@@ -1,0 +1,45 @@
+Eloipool - Python Bitcoin pool server
+Copyright (C) 2011-2013  Luke Dashjr <luke-jr+eloipool@utopios.org>
+
+
+Copyright License
+-----------------
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+
+Dependencies
+------------
+Python 3.2+			http://python.org
+python-bitcoinrpc	https://github.com/jgarzik/python-bitcoinrpc
+python-base58		https://gitorious.org/bitcoin/python-base58
+
+Optional Dependencies
+---------------------
+midstate			http://gitorious.org/midstate/midstate
+Psycopg2			http://initd.org/psycopg/
+PyMySQL				http://www.pymysql.org/
+
+
+Merged Mining
+-------------
+Eloipool supports merged mining using the setworkaux/gotwork RPC interface.
+A simple port of namecoin's merged-mine-proxy to this interface is available
+here:
+	https://gitorious.org/~Luke-Jr/bitcoin/luke-jr-bitcoin/blobs/namecoin_mmm/contrib/merged-mine-proxy
+Please be advised that:
+- Eloipool does not provide any interface for longpolling aux chains.
+- Empty and longpoll merkle roots are generated only as-needed, and will NOT be
+  regenerated when CoinbaseAux changes. This means shares found by getwork
+  miners after a longpoll will almost always be stale on your aux chain(s).
+  This problem does not affect GBT or stratum miners.

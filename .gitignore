@@ -1,0 +1,14 @@
+*.pyc
+*.pyo
+*~
+*.bak
+config*.py
+jsonrpc
+*.patch
+.*.kate-swp
+base58.py
+midstate.so
+*.orig
+*.rej
+eloipool.worklog
+bitcoinrpc
