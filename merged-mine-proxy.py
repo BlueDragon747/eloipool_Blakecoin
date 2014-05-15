@@ -253,7 +253,7 @@ class Listener(Server):
             self.rewrite_target = reverse_chunks("0000000007ffffffffffffffffffffffffffffffffffffffffffffffffffffff", 2)
         elif rewrite_target == 1024:
             self.rewrite_target = reverse_chunks("00000000000fffffffffffffffffffffffffffffffffffffffffffffffffffff", 2)
-        if merkle_size > 1024:
+        if merkle_size > 255:
             raise ValueError('merkle size up to 255')
         self.putChild('', self)
     
