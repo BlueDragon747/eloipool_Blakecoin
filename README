@@ -22,7 +22,9 @@ Dependencies
 ------------
 Python 3.2+			http://python.org
 python-bitcoinrpc	https://github.com/jgarzik/python-bitcoinrpc
-python-base58		https://gitorious.org/bitcoin/python-base58
+python-base58		https://gitorious.org/bitcoin/python-base58 *currently unavalible
+or 
+python-base58		https://github.com/BlueDragon747/python-base58
 
 Optional Dependencies
 ---------------------
