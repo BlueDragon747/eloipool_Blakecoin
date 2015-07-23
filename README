@@ -26,7 +26,7 @@ python-base58		https://gitorious.org/bitcoin/python-base58
 
 Optional Dependencies
 ---------------------
-midstate			http://gitorious.org/midstate/midstate
+midstate			http://gitorious.org/midstate/midstate *not needed for blake256
 Psycopg2			http://initd.org/psycopg/
 PyMySQL				http://www.pymysql.org/
 
@@ -34,9 +34,15 @@ PyMySQL				http://www.pymysql.org/
 Merged Mining
 -------------
 Eloipool supports merged mining using the setworkaux/gotwork RPC interface.
-A simple port of namecoin's merged-mine-proxy to this interface is available
-here:
-	https://gitorious.org/~Luke-Jr/bitcoin/luke-jr-bitcoin/blobs/namecoin_mmm/contrib/merged-mine-proxy
+A simple port of namecoin's merged-mine-proxy to this interface is included:
+
+	https://github.com/BlueDragon747/eloipool_Blakecoin/blob/master/merged-mine-proxy.py
+	
+Dependencies
+------------
+Python 2.7
+python-twisted
+	
 Please be advised that:
 - Eloipool does not provide any interface for longpolling aux chains.
 - Empty and longpoll merkle roots are generated only as-needed, and will NOT be
