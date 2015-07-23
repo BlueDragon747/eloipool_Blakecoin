@@ -50,7 +50,7 @@ midstate		http://gitorious.org/midstate/midstate *not needed for blake256
 Merged Mining
 -------------
 Eloipool supports merged mining using the setworkaux/gotwork RPC interface.
-A simple port of namecoin's merged-mine-proxy to this interface is included:
+A simple port of namecoin's merged-mine-proxy to this interface is included and modified to allow more AUX chains:
 
 	https://github.com/BlueDragon747/eloipool_Blakecoin/blob/master/merged-mine-proxy.py
 	
