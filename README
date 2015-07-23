@@ -34,13 +34,13 @@ python-base58		https://github.com/BlueDragon747/python-base58
 
 or
 python-bitcoinrpc	https://github.com/jgarzik/python-bitcoinrpc
-python-base58		https://gitorious.org/bitcoin/python-base58 *currently unavalible moved to gitlab
+python-base58		https://gitorious.org/bitcoin/python-base58 *unavalible moved to gitlab
 
 Optional Dependencies
 ---------------------
 db connector if using a database only need one! 
 PyMySQL			http://www.pymysql.org/
-CyMySQL			https://github.com/nakagami/CyMySQL *has speed advantage if using Cython 
+CyMySQL			https://github.com/nakagami/CyMySQL *faster if using Cython 
 Psycopg2		http://initd.org/psycopg/
 
 not needed:
