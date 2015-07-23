@@ -21,11 +21,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 Dependencies
 ------------
 Python 3.2+			http://python.org
-python-bitcoinrpc		https://github.com/jgarzik/python-bitcoinrpc
-python-base58			https://gitorious.org/bitcoin/python-base58 *currently unavalible
-or 
 python-bitcoinrpc		https://github.com/BlueDragon747/python-bitcoinrpc
 python-base58			https://github.com/BlueDragon747/python-base58
+
+or
+python-bitcoinrpc		https://github.com/jgarzik/python-bitcoinrpc
+python-base58			https://gitorious.org/bitcoin/python-base58 *currently unavalible
 
 Optional Dependencies
 ---------------------
