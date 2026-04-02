@@ -1,6 +1,7 @@
 # Eloipool - Python Bitcoin pool server
 # Copyright (C) 2011-2012  Luke Dashjr <luke-jr+eloipool@utopios.org>
 # Portions written by Carlos Pizarro <kr105@kr105.com>
+# Portions written by BlueDragon747 for the Blakecoin Project
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -16,6 +17,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 from blake8 import BLAKE
+#import blake_hash
 from hashlib import sha256
 from math import log
 import re
@@ -116,9 +118,11 @@ class shareLogFormatter:
 	def get_field_dash(self, subfunc):
 		return lambda s: subfunc(s) or '-'
 
+#def blakehash(b):
+#	return blake_hash.getHash(b, len(b))
 def blakehash(b):
 	return BLAKE(256).digest(b)
-
+	
 def onesha(b):
 	return sha256(b).digest()
 

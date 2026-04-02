@@ -1,6 +1,7 @@
 # Eloipool - Python Bitcoin pool server
 # Copyright (C) 2011-2012  Luke Dashjr <luke-jr+eloipool@utopios.org>
 # Portions written by Carlos Pizarro <kr105@kr105.com>
+# Portions written by BlueDragon747 for the Blakecoin Project
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -39,9 +40,11 @@ class MerkleTree:
 			PreL = [None]
 			StartL = 2
 		Ll = len(L)
+		if isinstance(L[1] if Ll > 1 else L[0], Txn):
+			L = list(map(lambda a: a.txid if a else a, L))
+		else:
+			L = list(L)
 		if detailed or Ll > 1:
-			if isinstance(L[1] if Ll > 1 else L[0], Txn):
-				L = list(map(lambda a: a.txid if a else a, L))
 			while True:
 				if detailed:
 					detail += L

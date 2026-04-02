@@ -15,6 +15,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 from binascii import b2a_hex
+from bitcoin.script import BitcoinScript, WitnessMagic
 from copy import deepcopy
 from jsonrpcserver import JSONRPCHandler
 from time import time
@@ -35,13 +36,8 @@ class _getblocktemplate:
 		],
 		'noncerange': '00000000ffffffff',
 		'target': '00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
-		'expires': 120,
-		'version': 2,
+		'version': 3,
 		'submitold': True,
-		
-		# Bitcoin-specific:
-		'sigoplimit': 20000,
-		'sizelimit': 1000000,
 	}
 	def doJSON_getblocktemplate(self, params):
 		if 'mode' in params and params['mode'] != 'template':
@@ -67,9 +63,16 @@ class _getblocktemplate:
 		else:
 			rv['longpollid'] = str(self.server.LPId)
 		tl = []
+		SegwitTemplate = False
+		for rule in merkleTree.MP['rules']:
+			if rule == 'segwit' or rule == '!segwit':
+				SegwitTemplate = True
+				break
 		for txn in merkleTree.data[1:]:
 			txno = {}
 			txno['data'] = b2a_hex(txn.data).decode('ascii')
+			if SegwitTemplate:
+				txno['txid'] = b2a_hex(txn.txid[::-1]).decode('ascii')
 			tl.append(txno)
 		rv['transactions'] = tl
 		now = int(time())
@@ -77,15 +80,25 @@ class _getblocktemplate:
 		# FIXME: ensure mintime is always >= real mintime, both here and in share acceptance
 		rv['mintime'] = now - 180
 		rv['curtime'] = now
-		rv['maxtime'] = now + 120
+		rv['maxtime'] = now + self.server.StaleWorkTimeout
+		rv['expires'] = self.server.StaleWorkTimeout
 		rv['bits'] = b2a_hex(bits[::-1]).decode('ascii')
 		rv['target'] = '%064x' % (target,)
 		t = deepcopy(merkleTree.data[0])
 		t.setCoinbase(cb)
+		if not merkleTree.witness_commitment is None:
+			assert t.outputs[-1] == (0, BitcoinScript.commitment(WitnessMagic + merkleTree.witness_commitment))
+			t.outputs.pop()
 		t.assemble()
 		txno = {}
 		txno['data'] = b2a_hex(t.data).decode('ascii')
 		rv['coinbasetxn'] = txno
+		rv['version'] = merkleTree.MP['version']
+		
+		rv['rules'] = merkleTree.MP['rules']
+		rv['vbavailable'] = merkleTree.MP['_filtered_vbavailable']
+		rv['vbrequired'] = rv['version'] & 0x1fffffff
+		
 		return rv
 	
 	def doJSON_submitblock(self, data, params = _NoParams):

@@ -1,6 +1,7 @@
 # Eloipool - Python Bitcoin pool server
 # Copyright (C) 2011-2012  Luke Dashjr <luke-jr+eloipool@utopios.org>
 # Portions written by Carlos Pizarro <kr105@kr105.com>
+# Portions written by BlueDragon747 for the Blakecoin Project
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -17,6 +18,7 @@
 
 from base58 import b58decode
 from util import blakehash
+WitnessMagic = b'\xaa\x21\xa9\xed'
 
 def _Address2PKH(addr):
 	try:
@@ -33,13 +35,33 @@ def _Address2PKH(addr):
 	return (ver, addr[1:-4])
 
 class BitcoinScript:
+	# Blakecoin address versions
+	# Mainnet P2PKH = 25/26 (0x19/0x1a) - note: 26 seen in some addresses
+	# Testnet P2PKH = 65 (0x41)
+	# Mainnet P2SH = 22 (0x16)
+	# Testnet P2SH = 127 (0x7f)
+	P2PKH_VERSIONS = (0, 25, 26, 65, 111)  # Include Bitcoin versions for compatibility
+	P2SH_VERSIONS = (5, 22, 127, 196)
+	
 	@classmethod
 	def toAddress(cls, addr):
 		d = _Address2PKH(addr)
 		if not d:
 			raise ValueError('invalid address')
 		(ver, pubkeyhash) = d
-		return b'\x76\xa9\x14' + pubkeyhash + b'\x88\xac'
+		# Accept both Bitcoin and Blakecoin address versions
+		if ver in cls.P2PKH_VERSIONS:
+			return b'\x76\xa9\x14' + pubkeyhash + b'\x88\xac'
+		elif ver in cls.P2SH_VERSIONS:
+			return b'\xa9\x14' + pubkeyhash + b'\x87'
+		raise ValueError('invalid address version: %d (expected P2PKH: %s or P2SH: %s)' % (ver, cls.P2PKH_VERSIONS, cls.P2SH_VERSIONS))
+	
+	@classmethod
+	def commitment(cls, commitment):
+		clen = len(commitment)
+		if clen > 0x4b:
+			raise NotImplementedError
+		return b'\x6a' + bytes((clen,)) + commitment
 
 def countSigOps(s):
 	# FIXME: don't count data as ops

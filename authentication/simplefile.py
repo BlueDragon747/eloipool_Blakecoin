@@ -24,7 +24,7 @@ import os
 
 _logger = logging.getLogger('authentication.simplefile')
 
-class simplefile(threading.Thread):
+class usemysql(threading.Thread):
         def __init__(self, filename, **ka):
             super().__init__(**ka.get('thropts', {}))
             self.fn=filename

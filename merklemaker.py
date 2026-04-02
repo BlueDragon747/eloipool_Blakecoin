@@ -1,6 +1,7 @@
 # Eloipool - Python Bitcoin pool server
 # Copyright (C) 2011-2013  Luke Dashjr <luke-jr+eloipool@utopios.org>
 # Portions written by Carlos Pizarro <kr105@kr105.com>
+# Portions written by BlueDragon747 for the Blakecoin Project
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -17,7 +18,7 @@
 
 from binascii import b2a_hex
 import bitcoin.script
-from bitcoin.script import countSigOps
+from bitcoin.script import BitcoinScript, countSigOps
 from bitcoin.txn import Txn
 from bitcoin.varlen import varlenEncode, varlenDecode
 from collections import deque
@@ -28,25 +29,55 @@ import logging
 from math import log
 from merkletree import MerkleTree
 import socket
+import struct
 from struct import pack
 import threading
 from time import sleep, time
 import traceback
-from math import sqrt
+import util
 
 _makeCoinbase = [0, 0]
 _filecounter = 0
 
+SupportedRules = ('csv', 'segwit')
+
+def SplitRuleFlag(ruleflag):
+	MandatoryRule = (ruleflag[0] == '!')
+	if MandatoryRule:
+		return (True, ruleflag[1:])
+	else:
+		return (False, ruleflag)
+
+def CalculateWitnessCommitment(txnobjs, nonce, force=False):
+	gentx_withash = nonce
+	withashes = (gentx_withash,) + tuple(a.get_witness_hash() for a in txnobjs[1:])
+	
+	if not force:
+		txids = (gentx_withash,) + tuple(a.txid for a in txnobjs[1:])
+		if withashes == txids:
+			# Unnecessary
+			return None
+	
+	wmr = MerkleTree(data=withashes).merkleRoot()
+	commitment = util.dblsha(wmr + nonce)
+	return commitment
+
 def MakeBlockHeader(MRD):
 	(merkleRoot, merkleTree, coinbase, prevBlock, bits) = MRD[:5]
+	BlockVersionBytes = merkleTree.MP['_BlockVersionBytes']
 	timestamp = pack('<L', int(time()))
-	hdr = b'\2\0\0\0' + prevBlock + merkleRoot + timestamp + bits + b'501Rk'
+	hdr = BlockVersionBytes + prevBlock + merkleRoot + timestamp + bits + b'iolE'
 	return hdr
 
-def assembleBlock(blkhdr, txlist):
+def assembleBlock(blkhdr, txlist, wantGenTxNonce=None):
 	payload = blkhdr
 	payload += varlenEncode(len(txlist))
-	for tx in txlist:
+	gentxdata = txlist[0].data
+	assert gentxdata[4:6] != b'\0\1'
+	if wantGenTxNonce:
+		gentxdata = gentxdata[:4] + b'\0\1' + gentxdata[4:-4] + b'\x01\x20' + wantGenTxNonce + gentxdata[-4:]
+	payload += gentxdata
+	for tx in txlist[1:]:
 		payload += tx.data
 	return payload
 
@@ -62,6 +93,7 @@ class merkleMaker(threading.Thread):
 	]
 	GBTReq = {
 		'capabilities': GBTCaps,
+		'rules': SupportedRules,
 	}
 	GMPReq = {
 		'capabilities': GBTCaps,
@@ -83,8 +115,14 @@ class merkleMaker(threading.Thread):
 		self.MinimumTemplateScore = 1
 		self.currentBlock = (None, None, None)
 		self.lastBlock = (None, None, None)
+		self.WitnessNonce = b'\0' * 0x20
+		self.ForceWitnessCommitment = False
 	
 	def _prepare(self):
+		self.UseTemplateChecks = True
+		if getattr(self, 'TemplateChecks', True) is None:
+			self.TemplateChecks = ()
+			self.UseTemplateChecks = False
 		self.TemplateSources = list(getattr(self, 'TemplateSources', ()))
 		self.TemplateChecks = list(getattr(self, 'TemplateChecks', ()))
 		if getattr(self, 'BlockSubmissions', None) is None:
@@ -158,25 +196,23 @@ class merkleMaker(threading.Thread):
 		self.lastMerkleUpdate = 0
 		self.nextMerkleUpdate = 0
 	
-	def createClearMerkleTree(self, height, bits):
-		basenBits = 0x1E00FFFF
-		nShift = ((basenBits >> 24) & 0xff) - ((bits >> 24) & 0xff)
-		dDiff = float(basenBits & 0x007fffff) / float(bits & 0x007fffff);
-
-		while (nShift > 0):
-			dDiff *= 256.0
-			nShift -= 1
-
-		while (nShift < 0):
-			dDiff /= 256.0
-			nShift += 1
-
-		nSubsidy1 = int(sqrt(dDiff * height))
-		subsidy = nSubsidy1 + 2500000000;
-
-		cbtxn = self.makeCoinbaseTxn(subsidy, False)
+	def UpdateClearMerkleTree(self, MT, MP):
+		nMP = {}
+		for copy_mp in ('version', '_BlockVersionBytes', 'rules', '_filtered_vbavailable'):
+			nMP[copy_mp] = MP[copy_mp]
+		MT.MP = nMP
+	
+	def createClearMerkleTree(self, height):
+		subsidy = 5000000000;
+		
+		cbtxn = self.makeCoinbaseTxn(subsidy, False, witness_commitment=None)
+		cbtxn.setCoinbase(b'\0\0')  # necessary to avoid triggering segwit marker+flags
 		cbtxn.assemble()
-		return MerkleTree([cbtxn])
+		MT = MerkleTree([cbtxn])
+		if self.currentMerkleTree:
+			self.UpdateClearMerkleTree(MT, self.currentMerkleTree.MP)
+		MT.witness_commitment = None
+		return MT
 	
 	def updateBlock(self, newBlock, height = None, bits = None, _HBH = None):
 		if newBlock == self.currentBlock[0]:
@@ -231,11 +267,11 @@ class merkleMaker(threading.Thread):
 			else:
 				if lastHeight:
 					self.logger.warning('Change from height %d->%d; no longpoll merkleroots available!' % (lastHeight, height))
-				self.curClearMerkleTree = self.createClearMerkleTree(height, int(_HBH[1], 16))
+				self.curClearMerkleTree = self.createClearMerkleTree(height)
 				self.clearMerkleRoots = Queue(self.WorkQueueSizeClear[1])
 			if OCMR.empty():
 				OCMR.put(None)
-			self.nextMerkleTree = self.createClearMerkleTree(height + 1, int(_HBH[1], 16))
+			self.nextMerkleTree = self.createClearMerkleTree(height + 1)
 			self.nextMerkleRoots = Queue(self._MaxClearSize)
 		else:
 			self.logger.debug('Already using clear merkleroots for this height')
@@ -248,7 +284,9 @@ class merkleMaker(threading.Thread):
 				self.readyCV.notify_all()
 		
 		self.needMerkle = 2
-		self.onBlockChange()
+		# If we don't have MP yet, we need to wait until we do...
+		if hasattr(self.currentBlock, 'MP'):
+			self.onBlockChange()
 	
 	def _trimBlock(self, MP, txnlist, txninfo, floodn, msgf):
 		fee = txninfo[-1].get('fee', None)
@@ -283,15 +321,17 @@ class merkleMaker(threading.Thread):
 		return True
 	
 	def _makeBlockSafe(self, MP, txnlist, txninfo):
+		sizelimit = MP.get('sizelimit', 1000000) - 0x10000  # 64 KB breathing room
 		blocksize = sum(map(len, txnlist)) + 80
-		while blocksize > 934464:  # 1 "MB" limit - 64 KB breathing room
+		while blocksize > sizelimit:
 			txnsize = len(txnlist[-1])
 			self._trimBlock(MP, txnlist, txninfo, 'SizeLimit', lambda x: 'Making blocks over 1 MB size limit (%d bytes; %s)' % (blocksize, x))
 			blocksize -= txnsize
 		
 		# NOTE: This check doesn't work at all without BIP22 transaction obj format
+		sigoplimit = MP.get('sigoplimit', 20000) - 0x200  # 512 sigop breathing room
 		blocksigops = sum(a.get('sigops', 0) for a in txninfo)
-		while blocksigops > 19488:  # 20k limit - 0x200 breathing room
+		while blocksigops > sigoplimit:
 			txnsigops = txninfo[-1]['sigops']
 			self._trimBlock(MP, txnlist, txninfo, 'SigOpLimit', lambda x: 'Making blocks over 20k SigOp limit (%d; %s)' % (blocksigops, x))
 			blocksigops -= txnsigops
@@ -367,12 +407,35 @@ class merkleMaker(threading.Thread):
 		oMP = MP
 		MP = deepcopy(MP)
 		
+		if MP['version'] & 0xe0000000 != 0x20000000:
+			self.logger.error('Template from \'%s\' has non-BIP9 block version (%x)' % (TS['name'], MP['version']))
+			return None
+		
+		ISupportAllRules = True
+		for ruleflag in MP['rules']:
+			(MandatoryRule, rule) = SplitRuleFlag(ruleflag)
+			if rule not in SupportedRules:
+				ISupportAllRules = False
+				if MandatoryRule:
+					self.logger.error('Template from \'%s\' strictly requires unsupported rule \'%s\'', TS['name'], rule)
+					return None
+				else:
+					self.logger.warning('Template from \'%s\' loosely requires unsupported rule \'%s\'', TS['name'], rule)
+		
+		MP['_filtered_vbavailable'] = {}
+		for ruleflag in MP['vbavailable']:
+			rulebit = MP['vbavailable'][ruleflag]
+			rulemask = (1 << rulebit)
+			if MP['version'] & rulemask:
+				MP['_filtered_vbavailable'][ruleflag] = rulebit
+		
 		prevBlock = bytes.fromhex(MP['previousblockhash'])[::-1]
 		if 'height' not in MP:
 			MP['height'] = TS['access'].getinfo()['blocks'] + 1
 		height = MP['height']
 		bits = bytes.fromhex(MP['bits'])[::-1]
 		(MP['_bits'], MP['_prevBlock']) = (bits, prevBlock)
+		MP['_BlockVersionBytes'] = struct.pack('<L', MP['version'])
 		if (prevBlock, height, bits) != self.currentBlock and (self.currentBlock[1] is None or height > self.currentBlock[1]):
 			self.updateBlock(prevBlock, height, bits, _HBH=(MP['previousblockhash'], MP['bits']))
 		
@@ -390,25 +453,37 @@ class merkleMaker(threading.Thread):
 		txnlist = [a for a in map(bytes.fromhex, txnlist)]
 		
 		self._makeBlockSafe(MP, txnlist, txninfo)
+		if len(MP['transactions']) != len(txnlist) and not ISupportAllRules:
+			self.logger.error('Template from \'%s\' should be trimmed, but requires unsupported rule(s)', TS['name'])
+			return None
 		
-		cbtxn = self.makeCoinbaseTxn(MP['coinbasevalue'], prevBlockHex = MP['previousblockhash'])
+		txnobjs = [None]
+		for i in range(len(txnlist)):
+			iinfo = txninfo[i]
+			ka = {}
+			if 'txid' in iinfo:
+				ka['txid'] = bytes.fromhex(iinfo['txid'])[::-1]
+			txnobjs.append(Txn(data=txnlist[i], **ka))
+		
+		witness_commitment = CalculateWitnessCommitment(txnobjs, self.WitnessNonce, force=self.ForceWitnessCommitment)
+		
+		cbtxn = self.makeCoinbaseTxn(MP['coinbasevalue'], prevBlockHex = MP['previousblockhash'], witness_commitment=witness_commitment)
 		cbtxn.setCoinbase(b'\0\0')
 		cbtxn.assemble()
-		txnlist.insert(0, cbtxn.data)
-		txninfo.insert(0, {
-		})
+		txnobjs[0] = cbtxn
 		
-		txnlist = [a for a in map(Txn, txnlist[1:])]
-		txnlist.insert(0, cbtxn)
-		txnlist = list(txnlist)
-		newMerkleTree = MerkleTree(txnlist)
+		txnobjs = list(txnobjs)
+		newMerkleTree = MerkleTree(txnobjs)
 		newMerkleTree.POTInfo = MP.get('POTInfo')
 		newMerkleTree.MP = MP
 		newMerkleTree.oMP = oMP
+		newMerkleTree.witness_commitment = witness_commitment
 		
 		return newMerkleTree
 	
 	def _CheckTemplate(self, newMerkleTree, TS):
+		if not self.UseTemplateChecks:
+			return (None, None)
 		TCList = self.TemplateChecks
 		if not TCList:
 			if 'proposal' not in newMerkleTree.oMP.get('capabilities', ()):
@@ -430,10 +505,13 @@ class merkleMaker(threading.Thread):
 		coinbase = self.makeCoinbase(height=height)
 		cbtxn.setCoinbase(coinbase)
 		cbtxn.assemble()
+		newMerkleTree.recalculate(True)
 		merkleRoot = newMerkleTree.merkleRoot()
 		MRD = (merkleRoot, newMerkleTree, coinbase, prevBlock, bits)
 		blkhdr = MakeBlockHeader(MRD)
-		data = assembleBlock(blkhdr, txnlist)
+		need_gentx_nonce = (not newMerkleTree.witness_commitment is None)
+		# 0.13 doesn't allow segwit-enabled block proposals without the generation transaction in witness form with its nonce
+		data = assembleBlock(blkhdr, txnlist, wantGenTxNonce=self.WitnessNonce if need_gentx_nonce else None)
 		ProposeReq = {
 			"mode": "proposal",
 			"data": b2a_hex(data).decode('utf8'),
@@ -492,6 +570,8 @@ class merkleMaker(threading.Thread):
 	def _updateMerkleTree_fromTS(self, TS):
 		MP = self._CallGBT(TS)
 		newMerkleTree = self._ProcessGBT(MP, TS)
+		if newMerkleTree is None:
+			return None
 		
 		# Some versions of bitcoinrpc ServiceProxy have problems copying/pickling, so just store name and URI for now
 		newMerkleTree.source = TS['name']
@@ -535,8 +615,9 @@ class merkleMaker(threading.Thread):
 					# NOTE: If you're going to try to remove this preference for the highest block, you need to (at least) stop _ProcessGBT from calling updateBlock whenever it sees a new high
 					AcceptRatio += newMerkleTree.MP['height']
 					
+					self.logger.debug('Template from \'%s\' has %s acceptance ratio at height %s' % (TS['name'], AcceptRatio, newMerkleTree.MP['height']))
 					if Best[0] < AcceptRatio:
-						Best = r
+						Best = (AcceptRatio, newMerkleTree)
 						if AcceptRatio == 1:
 							break
 				except:
@@ -555,6 +636,12 @@ class merkleMaker(threading.Thread):
 		if blkbasics != self.currentBlock:
 			self.updateBlock(*blkbasics, _HBH=(MP['previousblockhash'], MP['bits']))
 		self.currentMerkleTree = BestMT
+		FirstTemplate = not hasattr(self.curClearMerkleTree, 'MP')
+		self.UpdateClearMerkleTree(self.curClearMerkleTree, MP)
+		self.UpdateClearMerkleTree(self.nextMerkleTree, MP)
+		if FirstTemplate:
+			# This was skipped until we had MP info, so do it now
+			self.onBlockChange()
 	
 	def _updateMerkleTree(self):
 		global now
@@ -753,6 +840,9 @@ def _test():
 		def critical(self, *a):
 			if self.LO > 1: return
 			reallogger.critical(*a)
+		def error(self, *a):
+			if self.LO > 0.5: return
+			reallogger.error(*a)
 		def warning(self, *a):
 			if self.LO: return
 			reallogger.warning(*a)
@@ -804,9 +894,9 @@ def _test():
 	txninfo[2]['fee'] = 0
 	assert MBS(1) == (MP, txnlist, txninfo)
 	# _ProcessGBT tests
-	def makeCoinbaseTxn(coinbaseValue, useCoinbaser = True, prevBlockHex = None):
+	def makeCoinbaseTxn(coinbaseValue, useCoinbaser = True, prevBlockHex = None, witness_commitment=None):
 		txn = Txn.new()
-		txn.addOutput(coinbaseValue, b'')
+		txn.addOutput(coinbaseValue, BitcoinScript.commitment(witness_commitment) if witness_commitment else b'')
 		return txn
 	MM.makeCoinbaseTxn = makeCoinbaseTxn
 	MM.updateBlock = lambda *a, **ka: None
@@ -820,7 +910,9 @@ def _test():
 		'height': 219507,
 		'coinbasevalue': 3,
 		'previousblockhash': '000000000000012806bc100006dc83220bd9c2ac2709dc14a0d0fa1d6f9b733c',
-		'version': 1,
+		'version': 0x20000000,
+		'rules': (),
+		'vbavailable': {},
 		'bits': '1a05a6b1'
 	}
 	nMT = MM._ProcessGBT(gbt)

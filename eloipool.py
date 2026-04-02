@@ -3,6 +3,7 @@
 # Copyright (C) 2011-2013  Luke Dashjr <luke-jr+eloipool@utopios.org>
 # Portions written by Peter Leurs <kinlo@triplemining.com>
 # Portions written by Carlos Pizarro <kr105@kr105.com>
+# Portions written by BlueDragon747 for the Blakecoin Project
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
@@ -19,6 +20,9 @@
 
 import argparse
 import importlib
+import socket  # Required for IPv4/IPv6 address family detection
+import struct
+import util
 argparser = argparse.ArgumentParser()
 argparser.add_argument('-c', '--config', help='Config name to load from config_<ARG>.py')
 args = argparser.parse_args()
@@ -34,6 +38,11 @@ if not hasattr(config, 'ServerName'):
 if not hasattr(config, 'ShareTarget'):
 	config.ShareTarget = 0x00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 
+if not hasattr(config, 'WorkUpdateInterval'):
+	config.WorkUpdateInterval = 55
+config.StaleWorkTimeout = max(120, config.WorkUpdateInterval * 2)
+util.UniqueSessionIdManager._defaultDelay = config.StaleWorkTimeout
+
 
 import logging
 import logging.handlers
@@ -47,6 +56,7 @@ if len(rootlogger.handlers) == 0:
 		level=logging.DEBUG,
 	)
 	for infoOnly in (
+		'BitcoinRPC',
 		'checkShare',
 		'getTarget',
 		'JSONRPCHandler',
@@ -88,7 +98,7 @@ except:
 	pass
 
 
-from bitcoin.script import BitcoinScript
+from bitcoin.script import BitcoinScript, WitnessMagic
 from bitcoin.txn import Txn
 from base58 import b58decode
 from binascii import b2a_hex
@@ -96,7 +106,10 @@ from struct import pack
 import subprocess
 from time import time
 
-def makeCoinbaseTxn(coinbaseValue, useCoinbaser = True, prevBlockHex = None):
+def makeCoinbaseTxn(coinbaseValue, useCoinbaser = True, prevBlockHex = None, witness_commitment = NotImplemented):
+	if witness_commitment is NotImplemented:
+		raise NotImplementedError
+	
 	txn = Txn.new()
 	
 	if useCoinbaser and hasattr(config, 'CoinbaserCmd') and config.CoinbaserCmd:
@@ -123,6 +136,10 @@ def makeCoinbaseTxn(coinbaseValue, useCoinbaser = True, prevBlockHex = None):
 	
 	pkScript = BitcoinScript.toAddress(config.TrackerAddr)
 	txn.addOutput(coinbaseValue, pkScript)
+	
+	# SegWit commitment
+	if not witness_commitment is None:
+		txn.addOutput(0, BitcoinScript.commitment(WitnessMagic + witness_commitment))
 	
 	# TODO
 	# TODO: red flag on dupe coinbase
@@ -168,7 +185,7 @@ def _WorkLogPruner_I(wl):
 	for username in wl:
 		userwork = wl[username]
 		for wli in tuple(userwork.keys()):
-			if now > userwork[wli][1] + 120:
+			if now > userwork[wli][1] + config.StaleWorkTimeout:
 				del userwork[wli]
 				pruned += 1
 	WorkLogPruner.logger.debug('Pruned %d jobs' % (pruned,))
@@ -211,10 +228,13 @@ if not hasattr(config, 'DelayLogForUpstream'):
 
 if not hasattr(config, 'DynamicTargetting'):
 	config.DynamicTargetting = 0
+	config.DynamicTargetQuick = False
 else:
 	if not hasattr(config, 'DynamicTargetWindow'):
 		config.DynamicTargetWindow = 120
 	config.DynamicTargetGoal *= config.DynamicTargetWindow / 60
+	if not hasattr(config, 'DynamicTargetQuick'):
+		config.DynamicTargetQuick = True
 
 def submitGotwork(info):
 	try:
@@ -431,7 +451,7 @@ def blockSubmissionThread(payload, blkhash, share):
 			logShare(share)
 blockSubmissionThread.logger = logging.getLogger('blockSubmission')
 
-def checkData(share):
+def checkData(share, wld):
 	data = share['data']
 	data = data[:80]
 	(prevBlock, height, bits) = MM.currentBlock
@@ -444,15 +464,14 @@ def checkData(share):
 	if data[72:76] != bits:
 		raise RejectedShare('bad-diffbits')
 	
-	# Note that we should accept miners reducing version to 1 if they don't understand 2 yet
-	# FIXME: When the supermajority is upgraded to version 2, stop accepting 1!
-	if data[1:4] != b'\0\0\0' or data[0] > 2:
+	MT = wld[1]
+	if data[0:4] != MT.MP['_BlockVersionBytes']:
 		raise RejectedShare('bad-version')
 
-def buildStratumData(share, merkleroot):
+def buildStratumData(share, merkleroot, versionbytes):
 	(prevBlock, height, bits) = MM.currentBlock
 	
-	data = b'\x02\0\0\0'
+	data = versionbytes
 	data += prevBlock
 	data += merkleroot
 	data += share['ntime'][::-1]
@@ -468,22 +487,26 @@ def IsJobValid(wli, wluser = None):
 	if wli not in workLog[wluser]:
 		return False
 	(wld, issueT) = workLog[wluser][wli]
-	if time() < issueT - 120:
+	if time() < issueT - config.StaleWorkTimeout:
 		return False
 	return True
+
+def LookupWork(username, wli):
+	if username not in workLog:
+		raise RejectedShare('unknown-user')
+	MWL = workLog[username]
+	if wli not in MWL:
+		raise RejectedShare('unknown-work')
+	return MWL[wli]
 
 def checkShare(share):
 	shareTime = share['time'] = time()
 	
 	username = share['username']
+	checkQuickDiffAdjustment = False
 	if 'data' in share:
 		# getwork/GBT
-		checkData(share)
 		data = share['data']
-		
-		if username not in workLog:
-			raise RejectedShare('unknown-user')
-		MWL = workLog[username]
 		
 		shareMerkleRoot = data[36:68]
 		if 'blkdata' in share:
@@ -502,18 +525,18 @@ def checkShare(share):
 			mode = 'MRD'
 			moden = 0
 			coinbase = None
+		
+		(wld, issueT) = LookupWork(username, wli)
+		checkData(share, wld)
 	else:
 		# Stratum
-		MWL = workLog[None]
+		checkQuickDiffAdjustment = config.DynamicTargetQuick
 		wli = share['jobid']
-		buildStratumData(share, b'\0' * 32)
+		(wld, issueT) = LookupWork(None, wli)
 		mode = 'MC'
 		moden = 1
 		othertxndata = b''
 	
-	if wli not in MWL:
-		raise RejectedShare('unknown-work')
-	(wld, issueT) = MWL[wli]
 	share[mode] = wld
 	
 	share['issuetime'] = issueT
@@ -525,7 +548,7 @@ def checkShare(share):
 		coinbase = workCoinbase + share['extranonce1'] + share['extranonce2']
 		cbtxn.setCoinbase(coinbase)
 		cbtxn.assemble()
-		data = buildStratumData(share, workMerkleTree.withFirst(cbtxn))
+		data = buildStratumData(share, workMerkleTree.withFirst(cbtxn), workMerkleTree.MP['_BlockVersionBytes'])
 		shareMerkleRoot = data[36:68]
 	
 	if data in DupeShareHACK:
@@ -607,7 +630,7 @@ def checkShare(share):
 	share['_targethex'] = '%064x' % (workTarget,)
 	
 	shareTimestamp = unpack('<L', data[68:72])[0]
-	if shareTime < issueT - 120:
+	if shareTime < issueT - config.StaleWorkTimeout:
 		raise RejectedShare('stale-work')
 	if shareTimestamp < shareTime - 300:
 		raise RejectedShare('time-too-old')
@@ -644,6 +667,8 @@ def checkShare(share):
 			userStatus[username][2] += 1
 		else:
 			userStatus[username][2] += float(target) / workTarget
+		if checkQuickDiffAdjustment and userStatus[username][2] > config.DynamicTargetGoal * 2:
+			stratumsrv.quickDifficultyUpdate(username)
 checkShare.logger = logging.getLogger('checkShare')
 
 def logShare(share):
@@ -675,6 +700,9 @@ def receiveShare(share):
 		share['rejectReason'] = 'ERROR'
 		raise
 	finally:
+		if 'data' not in share:
+			# In case of rejection, data might not have been defined yet, but logging may need it
+			buildStratumData(share, b'\0' * 32, b'\xff\xff\xff\xff')
 		if not share.get('upstreamRejectReason', None) is PendingUpstream:
 			logShare(share)
 
@@ -819,7 +847,7 @@ def restoreState(SAVE_STATE_FILENAME):
 					# Current format, from 2012-02-03 onward
 					DupeShareHACK = pickle.load(f)
 				
-				if t + 120 >= time():
+				if t + config.StaleWorkTimeout >= time():
 					workLog = pickle.load(f)
 				else:
 					logger.debug('Skipping restore of expired workLog')
@@ -838,7 +866,30 @@ import threading
 import sharelogging
 import authentication
 from stratumserver import StratumServer
-import imp
+import importlib.util
+import sys
+
+def load_module_from_file(name, path):
+    """Load a module from a file path - replaces imp.find_module/load_module"""
+    import os
+    # Find the module spec
+    for p in path:
+        module_path = os.path.join(p, name + '.py')
+        if os.path.exists(module_path):
+            spec = importlib.util.spec_from_file_location(name, module_path)
+            if spec and spec.loader:
+                m = importlib.util.module_from_spec(spec)
+                sys.modules[name] = m
+                spec.loader.exec_module(m)
+                return m
+    raise ImportError("No module named %s" % name)
+
+def get_address_family(server_address):
+	"""
+	FORCE IPv4 ONLY - Modified to always use IPv4 sockets.
+	Returns socket.AF_INET for all addresses.
+	"""
+	return socket.AF_INET
 
 if __name__ == "__main__":
 	if not hasattr(config, 'ShareLogging'):
@@ -876,8 +927,7 @@ if __name__ == "__main__":
 		name = i['type']
 		parameters = i
 		try:
-			fp, pathname, description = imp.find_module(name, sharelogging.__path__)
-			m = imp.load_module(name, fp, pathname, description)
+			m = load_module_from_file(name, sharelogging.__path__)
 			lo = getattr(m, name)(**parameters)
 			loggersShare.append(lo)
 		except:
@@ -890,8 +940,7 @@ if __name__ == "__main__":
 		name = i['module']
 		parameters = i
 		try:
-			fp, pathname, description = imp.find_module(name, authentication.__path__)
-			m = imp.load_module(name, fp, pathname, description)
+			m = load_module_from_file(name, authentication.__path__)
 			lo = getattr(m, name)(**parameters)
 			authenticators.append(lo)
 		except:
@@ -901,7 +950,7 @@ if __name__ == "__main__":
 	if not hasattr(config, 'BitcoinNodeAddresses'):
 		config.BitcoinNodeAddresses = ()
 	for a in config.BitcoinNodeAddresses:
-		LSbc.append(NetworkListener(bcnode, a))
+		LSbc.append(NetworkListener(bcnode, a, get_address_family(a)))
 	
 	if hasattr(config, 'UpstreamBitcoindNode') and config.UpstreamBitcoindNode:
 		BitcoinLink(bcnode, dest=config.UpstreamBitcoindNode)
@@ -920,7 +969,7 @@ if __name__ == "__main__":
 		config.JSONRPCAddresses.insert(0, config.JSONRPCAddress)
 	LS = []
 	for a in config.JSONRPCAddresses:
-		LS.append(JSONRPCListener(server, a))
+		LS.append(JSONRPCListener(server, a, get_address_family(a)))
 	if hasattr(config, 'SecretUser'):
 		server.SecretUser = config.SecretUser
 	server.aux = MM.CoinbaseAux
@@ -929,6 +978,7 @@ if __name__ == "__main__":
 	server.receiveShare = receiveShare
 	server.RaiseRedFlags = RaiseRedFlags
 	server.ShareTarget = config.ShareTarget
+	server.StaleWorkTimeout = config.StaleWorkTimeout
 	server.checkAuthentication = checkAuthentication
 	
 	if hasattr(config, 'TrustedForwarders'):
@@ -944,10 +994,11 @@ if __name__ == "__main__":
 	stratumsrv.defaultTarget = config.ShareTarget
 	stratumsrv.IsJobValid = IsJobValid
 	stratumsrv.checkAuthentication = checkAuthentication
+	stratumsrv.WorkUpdateInterval = config.WorkUpdateInterval
 	if not hasattr(config, 'StratumAddresses'):
 		config.StratumAddresses = ()
 	for a in config.StratumAddresses:
-		NetworkListener(stratumsrv, a)
+		NetworkListener(stratumsrv, a, get_address_family(a))
 	
 	MM.start()
 	

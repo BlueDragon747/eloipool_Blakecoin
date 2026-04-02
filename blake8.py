@@ -339,7 +339,7 @@ class BLAKE(object):
         # if too short, prefix with null bytes.  if too long, 
         # truncate high order bytes
         if len(salt) < saltsize:
-            salt = (chr(0)*(saltsize-len(salt)) + salt)
+            salt = (bytes([0])*(saltsize-len(salt)) + salt)
         else:
             salt = salt[-saltsize:]
         # prep the salt array

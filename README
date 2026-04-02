@@ -3,9 +3,9 @@ Copyright (C) 2011-2015  Luke Dashjr <luke-jr+eloipool@utopios.org>
 Portions written by Peter Leurs <kinlo@triplemining.com>
 
 Eloipool - Python Blakecoin pool server
-Copyright (c) 2013-2015 The Blakecoin developers
+Copyright (c) 2013-2026 The Blakecoin developers
 Portions written by Carlos Pizarro <kr105@kr105.com>
-Portions written by BlueDragon747 
+Portions written by BlueDragon747 for the Blakecoin Project
 
 for the MMP licence also see: https://github.com/BlueDragon747/eloipool_Blakecoin/blob/master/COPYING
 
@@ -28,13 +28,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 Dependencies
 ------------
-Python 3.2+		http://python.org
+Python 3.8+		http://python.org
 python-bitcoinrpc	https://github.com/BlueDragon747/python-bitcoinrpc
 python-base58		https://github.com/BlueDragon747/python-base58
 
-or
-python-bitcoinrpc	https://github.com/jgarzik/python-bitcoinrpc
-python-base58		https://gitorious.org/bitcoin/python-base58 *unavalible moved to gitlab
 
 Optional Dependencies
 ---------------------
@@ -51,12 +48,13 @@ Merged Mining
 -------------
 Eloipool supports merged mining using the setworkaux/gotwork RPC interface.
 A simple port of namecoin's merged-mine-proxy to this interface is included and modified to allow more AUX chains:
+Portions rewritten for python 3.8+
 
-	https://github.com/BlueDragon747/eloipool_Blakecoin/blob/master/merged-mine-proxy.py
+	https://github.com/BlueDragon747/eloipool_Blakecoin/blob/master/merged-mine-proxy.py3
 	
 Dependencies
 ------------
-Python 2.7
+Python 3.8+
 python-twisted
 	
 Please be advised that:

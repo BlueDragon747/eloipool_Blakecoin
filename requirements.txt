@@ -1,0 +1,49 @@
+# Eloipool Blakecoin - Python 3.10 Dependencies
+# Updated for Ubuntu 22.04 and Python 3.10
+
+# Database drivers (choose one or more based on your config)
+cymysql>=0.9.15          # MySQL/MariaDB support - pure Python implementation
+# PyMySQL>=1.0.0         # Alternative MySQL driver
+# psycopg2-binary>=2.9.0 # PostgreSQL support (if using postgres)
+# psycopg2>=2.9.0       # PostgreSQL support (compile from source)
+
+# JSON-RPC
+jsonrpc>=0.1.0
+
+# Core dependencies (usually included with Python)
+# asyncio (built-in)
+# threading (built-in)
+# logging (built-in)
+# socket (built-in)
+# struct (built-in)
+# hashlib (built-in)
+# binascii (built-in)
+# base64 (built-in)
+# time (built-in)
+# os (built-in)
+# sys (built-in)
+# copy (built-in)
+# collections (built-in)
+# queue (built-in)
+# importlib (built-in)
+# json (built-in)
+# re (built-in)
+# math (built-in)
+# select (built-in)
+# errno (built-in)
+# datetime (built-in)
+# email (built-in)
+# gzip (built-in)
+# io (built-in)
+# stat (built-in)
+# argparse (built-in)
+# pickle (built-in)
+# signal (built-in)
+# subprocess (built-in)
+# traceback (built-in)
+# heapq (built-in)
+# types (built-in)
+
+# Note: This package uses asynchat/asyncore which are deprecated in Python 3.10
+# They still work but show deprecation warnings. For Python 3.12+, these will
+# need to be replaced with asyncio.
