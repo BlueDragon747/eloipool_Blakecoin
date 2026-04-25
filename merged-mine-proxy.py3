@@ -638,7 +638,7 @@ class Listener(Server):
                                 # Wait before retry (exponential backoff)
                                 wait_time = min(0.5 * (2 ** submit_attempt), 3.0)
                                 logger.info("%s: Retrying in %.1fs...", get_chain_name(chain), wait_time)
-                                yield defer.sleep(wait_time)
+                                yield task.deferLater(reactor, wait_time, lambda: None)
                             else:
                                 logger.error("%s: All submission attempts failed - marking unhealthy", get_chain_name(chain))
                                 self._mark_chain_unhealthy(chain)
