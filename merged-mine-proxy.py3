@@ -16,7 +16,7 @@ import socket
 from datetime import datetime
 from time import sleep, time
 
-from twisted.internet import defer, reactor, threads
+from twisted.internet import defer, reactor, threads, task
 from twisted.web import server, resource
 from twisted.internet.error import ConnectionRefusedError
 import twisted.internet.error
@@ -609,7 +609,29 @@ class Listener(Server):
                                 logger.debug("%s: Block not accepted (likely orphan or already submitted)", get_chain_name(chain))
                             any_solved = any_solved or result
                             break  # Success - exit retry loop
+                        except Error as e:
+                            # Handle specific RPC errors
+                            if hasattr(e, '_code') and e._code == -8:
+                                # Block hash unknown - aux chain moved to new block
+                                logger.warning("%s: Block hash unknown - aux chain has moved to new block, share is orphaned", 
+                                             get_chain_name(chain))
+                                # Don't retry, don't mark unhealthy - this is expected behavior
+                                # when aux chain finds a block before we submit
+                                break
+                            else:
+                                # Other RPC errors - log and retry
+                                logger.error("%s submission failed (attempt %d/%d): %s", 
+                                             get_chain_name(chain), submit_attempt + 1, max_submit_retries, e)
+                                if submit_attempt < max_submit_retries - 1:
+                                    # Wait before retry (exponential backoff)
+                                    wait_time = min(0.5 * (2 ** submit_attempt), 3.0)
+                                    logger.info("%s: Retrying in %.1fs...", get_chain_name(chain), wait_time)
+                                    yield task.deferLater(reactor, wait_time, lambda: None)
+                                else:
+                                    logger.error("%s: All submission attempts failed - marking unhealthy", get_chain_name(chain))
+                                    self._mark_chain_unhealthy(chain)
                         except Exception as e:
+                            # Non-RPC errors (connection issues, etc.)
                             logger.error("%s submission failed (attempt %d/%d): %s", 
                                          get_chain_name(chain), submit_attempt + 1, max_submit_retries, e)
                             if submit_attempt < max_submit_retries - 1:
