@@ -124,6 +124,7 @@ class Proxy(object):
     CONNECT_TIMEOUT = 30
     IDLE_TIMEOUT = 1800  # Force reconnect after 30 minutes idle
     MAX_CONSECUTIVE_FAILURES = 5  # Circuit breaker threshold
+    BREAKER_COOLDOWN_S = 30  # Half-open probe after this many seconds
     
     def __init__(self, url):
         (schema, netloc, path, query, fragment) = urlsplit(url)
@@ -139,6 +140,7 @@ class Proxy(object):
         self._http = None
         self._last_used = 0
         self._consecutive_failures = 0
+        self._breaker_opened_at = 0  # epoch when breaker tripped open
         self._total_requests = 0
     
     def _connect(self):
@@ -213,10 +215,14 @@ class Proxy(object):
     
     def callRemote(self, method, *params):
         """Call remote method with retry logic and circuit breaker"""
-        # Circuit breaker check
+        # Circuit breaker check (with half-open self-heal)
         if self._consecutive_failures >= self.MAX_CONSECUTIVE_FAILURES:
-            logger.error("Circuit breaker open for %s - too many failures", self._url)
-            raise Error(-32099, 'Circuit breaker open - too many connection failures', self._url)
+            elapsed = time() - self._breaker_opened_at
+            if elapsed < self.BREAKER_COOLDOWN_S:
+                logger.error("Circuit breaker open for %s - too many failures", self._url)
+                raise Error(-32099, 'Circuit breaker open - too many connection failures', self._url)
+            # Cooldown elapsed — half-open: let one probe through.
+            logger.info("Circuit breaker half-open for %s — probing after %ds cooldown", self._url, int(elapsed))
         
         last_error = None
         
@@ -230,6 +236,8 @@ class Proxy(object):
             except (httplib.HTTPException, socket.error, OSError, ConnectionError) as e:
                 last_error = e
                 self._consecutive_failures += 1
+                if self._consecutive_failures >= self.MAX_CONSECUTIVE_FAILURES:
+                    self._breaker_opened_at = time()
                 logger.warning("RPC call failed (attempt %d/%d): %s", 
                                attempt + 1, self.MAX_RETRIES, e)
                 
@@ -261,6 +269,8 @@ class Proxy(object):
                 last_error = e
                 logger.error("Unexpected error in callRemote: %s", e)
                 self._consecutive_failures += 1
+                if self._consecutive_failures >= self.MAX_CONSECUTIVE_FAILURES:
+                    self._breaker_opened_at = time()
                 if attempt < self.MAX_RETRIES - 1:
                     sleep(0.1)
         
