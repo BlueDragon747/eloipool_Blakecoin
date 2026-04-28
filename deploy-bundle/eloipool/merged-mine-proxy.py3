@@ -599,6 +599,10 @@ class Listener(Server):
         self.chain_health[chain_idx]['healthy'] = True
         self.chain_health[chain_idx]['last_success'] = time()
         self.chain_health[chain_idx]['failures'] = 0
+        # Reset the debounce so the next failure (if any) logs at
+        # full volume — the operator wants to know about a fresh
+        # outage even if we recently spammed about an old one.
+        self.chain_health[chain_idx].pop('last_error_log', None)
         # Log recovery if it was previously down
         if not self.chain_health[chain_idx].get('was_reported_healthy', False):
             logger.info("%s (ID:%s) is now HEALTHY", get_chain_name(chain_idx), 
@@ -641,7 +645,23 @@ class Listener(Server):
         return branch
 
     def calc_merkle_index_for(self, chain_id, nonce):
-        """Calculate the merkle tree index for a chain ID and aux nonce."""
+        """Calculate the merkle tree index for a chain ID and aux nonce.
+
+        chain_ids are populated only after the daemon's first
+        getauxblock / createauxblock returns a non-empty aux template
+        (line 696). On a fresh boot — or any time a daemon is still in
+        IBD ("Node is downloading blocks") — the entry stays at the
+        `None` placeholder set in __init__. Pre-Wave-1 the `+= chain_id`
+        at line below raised TypeError every share for any chain whose
+        chain_id wasn't yet known, flooding the eloipool log.
+
+        Return None for a None chain_id; callers already have a
+        `if chain_merkle_index is not None` guard for the
+        unhealthy-skip path, so an unset chain just contributes no aux
+        merkle slot rather than crashing.
+        """
+        if chain_id is None:
+            return None
         rand = nonce
         rand = (rand * 1103515245 + 12345) & 0xffffffff
         rand += chain_id
@@ -721,16 +741,45 @@ class Listener(Server):
                     )
                     self._mark_chain_healthy(chain)
                     continue
-                logger.error("%s: Failed to get aux block: %s", get_chain_name(chain), e)
+                # Debounce: an aux daemon stuck in IBD ("-10 Node is
+                # downloading blocks") will throw on every poll. Without
+                # debouncing this fills mmp.log with hundreds of MB
+                # before the daemon even finishes syncing. Log once per
+                # chain on first failure, then at most every 60 s while
+                # it stays unhealthy. _mark_chain_unhealthy clears the
+                # flag on healthy→unhealthy transition so a fresh
+                # outage logs immediately.
+                health = self.chain_health.setdefault(chain, {})
+                now = time()
+                last = health.get('last_error_log', 0)
+                if now - last >= 60:
+                    logger.error("%s: Failed to get aux block: %s",
+                                 get_chain_name(chain), e)
+                    health['last_error_log'] = now
                 self._mark_chain_unhealthy(chain)
                 continue
-        
-        # Report health status
+
+        # Report health summary, but at most once a minute per
+        # transition. Pre-debounce this line fired every gotwork poll
+        # (every share submitted) which on a busy pool meant tens of
+        # them per second.
         total_chains = len(self.auxs)
+        now = time()
+        last_summary = getattr(self, '_last_health_summary_log', 0)
+        last_count = getattr(self, '_last_health_summary_count', None)
         if healthy_count < total_chains:
-            logger.warning("Only %d/%d aux chains are healthy", healthy_count, total_chains)
+            if (last_count != healthy_count) or (now - last_summary >= 60):
+                logger.warning("Only %d/%d aux chains are healthy",
+                               healthy_count, total_chains)
+                self._last_health_summary_log = now
+                self._last_health_summary_count = healthy_count
         else:
-            logger.debug("All %d aux chains are healthy", total_chains)
+            if last_count not in (None, total_chains):
+                logger.info("All %d aux chains are healthy", total_chains)
+                self._last_health_summary_log = now
+                self._last_health_summary_count = total_chains
+            else:
+                logger.debug("All %d aux chains are healthy", total_chains)
 
         merkle_nonce = self.choose_merkle_nonce([self.chain_ids[chain] if chain in aux_block_hashes else None for chain in range(len(self.auxs))])
         chain_indices = {}
@@ -894,16 +943,20 @@ class Listener(Server):
 
             # Submit to each aux chain
             for chain in range(len(self.auxs)):
-                chain_merkle_index = merkle_meta.get('chain_indices', {}).get(chain)
-                if chain_merkle_index is None:
-                    chain_merkle_index = self.calc_merkle_index(chain, merkle_nonce)
                 aux_solved.append(False)
-                
-                # Skip known-unhealthy chains to avoid wasted submissions
+
+                # Skip known-unhealthy chains to avoid wasted submissions.
+                # Done BEFORE calc_merkle_index so an unset chain_id
+                # (chains in IBD, or never reached by getauxblock) doesn't
+                # send rand += chain_id into a TypeError.
                 if not self._is_chain_healthy(chain):
                     chain_id = self.chain_ids[chain] if chain < len(self.chain_ids) else 'N/A'
                     logger.debug("%s (ID:%s) is unhealthy - skipping submission", get_chain_name(chain), chain_id)
                     continue
+
+                chain_merkle_index = merkle_meta.get('chain_indices', {}).get(chain)
+                if chain_merkle_index is None:
+                    chain_merkle_index = self.calc_merkle_index(chain, merkle_nonce)
                 
                 if chain_merkle_index is not None:
                     branch = self.merkle_branch(chain_merkle_index, merkle_tree)
