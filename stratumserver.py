@@ -330,12 +330,13 @@ class StratumServer(networkserver.AsyncSocketServer):
 			except:
 				pass
 		
-		self.updateJobOnly(wantClear=wantClear)
-		
-		self.WakeRequest = 1
-		self.wakeup()
-		
-		self.UpdateTask = self.schedule(self.updateJob, time() + self.WorkUpdateInterval)
+		try:
+			self.updateJobOnly(wantClear=wantClear)
+			
+			self.WakeRequest = 1
+			self.wakeup()
+		finally:
+			self.UpdateTask = self.schedule(self.updateJob, time() + self.WorkUpdateInterval)
 	
 	def doQuickUpdate(self):
 		PQU = self._PendingQuickUpdates

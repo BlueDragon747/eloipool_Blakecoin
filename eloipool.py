@@ -158,7 +158,7 @@ server = None
 stratumsrv = None
 def updateBlocks():
 	server.wakeLongpoll()
-	stratumsrv.updateJob()
+	stratumsrv.updateJob(wantClear=True)
 
 def blockChanged():
 	global MM, networkTarget, server
@@ -367,6 +367,14 @@ authenticators = []
 RBDs = []
 RBPs = []
 
+# Cap diagnostic lists to prevent unbounded memory growth
+MAX_DIAGNOSTIC_ENTRIES = 10
+
+def _capDiagnosticList(lst, entry):
+	lst.append(entry)
+	if len(lst) > MAX_DIAGNOSTIC_ENTRIES:
+		lst.pop(0)
+
 from bitcoin.varlen import varlenEncode, varlenDecode
 import bitcoin.txn
 from merklemaker import assembleBlock
@@ -421,7 +429,7 @@ def blockSubmissionThread(payload, blkhash, share):
 					RaiseRedFlags(gbterr_fmt)
 					nexterr = now + 5
 				if MM.currentBlock[0] not in myblock and tries > len(servers):
-					RBFs.append( (('next block', MM.currentBlock, now, (gbterr, gmperr)), payload, blkhash, share) )
+					_capDiagnosticList(RBFs, (('next block', MM.currentBlock, now, (gbterr, gmperr)), payload, blkhash, share))
 					RaiseRedFlags('Giving up on submitting block to upstream \'%s\'' % (TS['name'],))
 					if share['upstreamRejectReason'] is PendingUpstream:
 						share['upstreamRejectReason'] = 'GAVE UP'
@@ -440,7 +448,7 @@ def blockSubmissionThread(payload, blkhash, share):
 				# no big deal
 				blockSubmissionThread.logger.debug(msg)
 			else:
-				RBFs.append( (('upstream reject', reason, time()), payload, blkhash, share) )
+				_capDiagnosticList(RBFs, (('upstream reject', reason, time()), payload, blkhash, share))
 				RaiseRedFlags(msg)
 		else:
 			blockSubmissionThread.logger.debug('Upstream \'%s\' accepted block' % (TS['name'],))
@@ -487,7 +495,7 @@ def IsJobValid(wli, wluser = None):
 	if wli not in workLog[wluser]:
 		return False
 	(wld, issueT) = workLog[wluser][wli]
-	if time() < issueT - config.StaleWorkTimeout:
+	if time() > issueT + config.StaleWorkTimeout:
 		return False
 	return True
 
@@ -575,7 +583,7 @@ def checkShare(share):
 	
 	if blkhashn <= networkTarget:
 		logfunc("Submitting upstream")
-		RBDs.append( deepcopy( (data, txlist, share.get('blkdata', None), workMerkleTree, share, wld) ) )
+		_capDiagnosticList(RBDs, deepcopy( (data, txlist, share.get('blkdata', None), workMerkleTree, share, wld) ))
 		if not moden:
 			payload = assembleBlock(data, txlist)
 		else:
@@ -585,7 +593,7 @@ def checkShare(share):
 			else:
 				payload += assembleBlock(data, txlist)[80:]
 		logfunc('Real block payload: %s' % (b2a_hex(payload).decode('utf8'),))
-		RBPs.append(payload)
+		_capDiagnosticList(RBPs, payload)
 		threading.Thread(target=blockSubmissionThread, args=(payload, blkhash, share)).start()
 		bcnode.submitBlock(payload)
 		if config.DelayLogForUpstream:
@@ -630,7 +638,7 @@ def checkShare(share):
 	share['_targethex'] = '%064x' % (workTarget,)
 	
 	shareTimestamp = unpack('<L', data[68:72])[0]
-	if shareTime < issueT - config.StaleWorkTimeout:
+	if shareTime > issueT + config.StaleWorkTimeout:
 		raise RejectedShare('stale-work')
 	if shareTimestamp < shareTime - 300:
 		raise RejectedShare('time-too-old')
