@@ -162,7 +162,11 @@ server = None
 stratumsrv = None
 def updateBlocks():
 	server.wakeLongpoll()
-	stratumsrv.updateJob()
+	# Bluedragon memory leak fix: pass wantClear=True so the stratum
+	# server invalidates outstanding jobs on chain-tip change instead
+	# of leaving stale work in flight (paired with the stratumserver
+	# try/finally so the next update reschedule still fires on error).
+	stratumsrv.updateJob(wantClear=True)
 
 def blockChanged():
 	global MM, networkTarget, server
@@ -415,6 +419,20 @@ authenticators = []
 RBDs = []
 RBPs = []
 
+# Bluedragon memory leak fix: RBDs / RBPs / RBFs are operator-diagnostic
+# ring buffers (last few block-submission attempts retained for post-
+# mortem if the daemon rejects our work). Pre-fix they grew unbounded
+# — every share that crossed the network target appended a deepcopy of
+# the working state, and the lists were never trimmed. On a busy chain
+# the process RSS climbed indefinitely. Cap to MAX_DIAGNOSTIC_ENTRIES
+# via _capDiagnosticList() below; older entries fall off.
+MAX_DIAGNOSTIC_ENTRIES = 10
+
+def _capDiagnosticList(lst, entry):
+	lst.append(entry)
+	if len(lst) > MAX_DIAGNOSTIC_ENTRIES:
+		lst.pop(0)
+
 from bitcoin.varlen import varlenEncode, varlenDecode
 import bitcoin.txn
 from merklemaker import assembleBlock
@@ -469,7 +487,8 @@ def blockSubmissionThread(payload, blkhash, share):
 					RaiseRedFlags(gbterr_fmt)
 					nexterr = now + 5
 				if MM.currentBlock[0] not in myblock and tries > len(servers):
-					RBFs.append( (('next block', MM.currentBlock, now, (gbterr, gmperr)), payload, blkhash, share) )
+					# Bluedragon memory leak fix: cap diagnostic list size.
+					_capDiagnosticList(RBFs, (('next block', MM.currentBlock, now, (gbterr, gmperr)), payload, blkhash, share))
 					RaiseRedFlags('Giving up on submitting block to upstream \'%s\'' % (TS['name'],))
 					if share['upstreamRejectReason'] is PendingUpstream:
 						share['upstreamRejectReason'] = 'GAVE UP'
@@ -488,7 +507,8 @@ def blockSubmissionThread(payload, blkhash, share):
 				# no big deal
 				blockSubmissionThread.logger.debug(msg)
 			else:
-				RBFs.append( (('upstream reject', reason, time()), payload, blkhash, share) )
+				# Bluedragon memory leak fix: cap diagnostic list size.
+				_capDiagnosticList(RBFs, (('upstream reject', reason, time()), payload, blkhash, share))
 				RaiseRedFlags(msg)
 		else:
 			blockSubmissionThread.logger.debug('Upstream \'%s\' accepted block' % (TS['name'],))
@@ -535,7 +555,11 @@ def IsJobValid(wli, wluser = None):
 	if wli not in workLog[wluser]:
 		return False
 	(wld, issueT) = workLog[wluser][wli]
-	if time() < issueT - config.StaleWorkTimeout:
+	# Bluedragon memory leak fix: was `time() < issueT - StaleWorkTimeout`
+	# which inverts the staleness check (becomes true only when the
+	# work was issued FROM THE FUTURE, i.e. never). Should reject when
+	# now is more than StaleWorkTimeout after the issue time.
+	if time() > issueT + config.StaleWorkTimeout:
 		return False
 	return True
 
@@ -634,7 +658,9 @@ def checkShare(share):
 	
 	if parent_valid:
 		logfunc("Submitting upstream")
-		RBDs.append( deepcopy( (data, txlist, share.get('blkdata', None), workMerkleTree, share, wld) ) )
+		# Bluedragon memory leak fix: cap diagnostic list size. The
+		# deepcopy here is what made unbounded growth painful in RSS.
+		_capDiagnosticList(RBDs, deepcopy( (data, txlist, share.get('blkdata', None), workMerkleTree, share, wld) ))
 		if not moden:
 			payload = assembleBlock(data, txlist)
 		else:
@@ -644,7 +670,8 @@ def checkShare(share):
 			else:
 				payload += assembleBlock(data, txlist)[80:]
 		logfunc('Real block payload: %s' % (b2a_hex(payload).decode('utf8'),))
-		RBPs.append(payload)
+		# Bluedragon memory leak fix: cap diagnostic list size.
+		_capDiagnosticList(RBPs, payload)
 		threading.Thread(target=blockSubmissionThread, args=(payload, blkhash, share)).start()
 		bcnode.submitBlock(payload)
 		if config.DelayLogForUpstream:
@@ -698,7 +725,10 @@ def checkShare(share):
 			raise RejectedShare('high-hash')
 
 	shareTimestamp = unpack('<L', data[68:72])[0]
-	if shareTime < issueT - config.StaleWorkTimeout:
+	# Bluedragon memory leak fix: same staleness-check inversion as
+	# IsJobValid above. Reject when share arrives more than
+	# StaleWorkTimeout AFTER the work was issued.
+	if shareTime > issueT + config.StaleWorkTimeout:
 		raise RejectedShare('stale-work')
 	if shareTimestamp < shareTime - 300:
 		raise RejectedShare('time-too-old')
