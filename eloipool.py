@@ -162,21 +162,6 @@ server = None
 stratumsrv = None
 def updateBlocks():
 	server.wakeLongpoll()
-	# REVERTED: BlueDragon's patch passed wantClear=True here, which
-	# tells stratum to send `clean_jobs=true` to miners on every
-	# chain-tip change. On Blakecoin's fast block rate (~30-90s) and
-	# with sgminer-driven ASICs (Baikal BK-B in particular), the
-	# clean-jobs storm caused a 1-3s transition window per chain tip
-	# where the miner discards in-flight nonce ranges and reconfigures.
-	# Shares submitted in that window slip past prevblk/duplicate
-	# checks but fail the bdiff-1 floor (`H-not-zero`). Live ops
-	# observed reject rate of 5% pre-patch jump to 63%+ over the
-	# subsequent ~3 hours as vardiff drifted into the floor zone.
-	#
-	# Keeping wantClear=False (the default) restores miners' natural
-	# job-flow: they adopt the new job but finish in-flight work
-	# without panic. Memory-leak fix + stratumserver try/finally
-	# stay in place; only this one half of the patch reverts.
 	stratumsrv.updateJob()
 
 def blockChanged():
@@ -430,20 +415,6 @@ authenticators = []
 RBDs = []
 RBPs = []
 
-# Bluedragon memory leak fix: RBDs / RBPs / RBFs are operator-diagnostic
-# ring buffers (last few block-submission attempts retained for post-
-# mortem if the daemon rejects our work). Pre-fix they grew unbounded
-# — every share that crossed the network target appended a deepcopy of
-# the working state, and the lists were never trimmed. On a busy chain
-# the process RSS climbed indefinitely. Cap to MAX_DIAGNOSTIC_ENTRIES
-# via _capDiagnosticList() below; older entries fall off.
-MAX_DIAGNOSTIC_ENTRIES = 10
-
-def _capDiagnosticList(lst, entry):
-	lst.append(entry)
-	if len(lst) > MAX_DIAGNOSTIC_ENTRIES:
-		lst.pop(0)
-
 from bitcoin.varlen import varlenEncode, varlenDecode
 import bitcoin.txn
 from merklemaker import assembleBlock
@@ -498,8 +469,7 @@ def blockSubmissionThread(payload, blkhash, share):
 					RaiseRedFlags(gbterr_fmt)
 					nexterr = now + 5
 				if MM.currentBlock[0] not in myblock and tries > len(servers):
-					# Bluedragon memory leak fix: cap diagnostic list size.
-					_capDiagnosticList(RBFs, (('next block', MM.currentBlock, now, (gbterr, gmperr)), payload, blkhash, share))
+					RBFs.append( (('next block', MM.currentBlock, now, (gbterr, gmperr)), payload, blkhash, share) )
 					RaiseRedFlags('Giving up on submitting block to upstream \'%s\'' % (TS['name'],))
 					if share['upstreamRejectReason'] is PendingUpstream:
 						share['upstreamRejectReason'] = 'GAVE UP'
@@ -518,8 +488,7 @@ def blockSubmissionThread(payload, blkhash, share):
 				# no big deal
 				blockSubmissionThread.logger.debug(msg)
 			else:
-				# Bluedragon memory leak fix: cap diagnostic list size.
-				_capDiagnosticList(RBFs, (('upstream reject', reason, time()), payload, blkhash, share))
+				RBFs.append( (('upstream reject', reason, time()), payload, blkhash, share) )
 				RaiseRedFlags(msg)
 		else:
 			blockSubmissionThread.logger.debug('Upstream \'%s\' accepted block' % (TS['name'],))
@@ -566,19 +535,6 @@ def IsJobValid(wli, wluser = None):
 	if wli not in workLog[wluser]:
 		return False
 	(wld, issueT) = workLog[wluser][wli]
-	# REVERTED to the original no-op form. The "fixed" comparison
-	# (`time() > issueT + StaleWorkTimeout`) caused a 63% reject rate
-	# on a live BK-B miner once shipped — `issueT` semantics aren't
-	# what the BlueDragon patch author assumed, so a lot of in-flight
-	# valid work was arriving outside the window and getting rejected
-	# as stale. Pre-fix this branch is effectively unreachable (only
-	# true if the system clock ran backwards by > StaleWorkTimeout
-	# seconds), so all work passes the check. That tolerates a small-
-	# but-real risk of stale-work upstream submissions (the occasional
-	# `high-hash` rejection from the daemon), but the cost of that is
-	# far smaller than blowing up the legitimate share rate. If we
-	# want a real staleness check it needs a separate audit of issueT
-	# semantics + a controlled test before re-enabling.
 	if time() < issueT - config.StaleWorkTimeout:
 		return False
 	return True
@@ -678,9 +634,7 @@ def checkShare(share):
 	
 	if parent_valid:
 		logfunc("Submitting upstream")
-		# Bluedragon memory leak fix: cap diagnostic list size. The
-		# deepcopy here is what made unbounded growth painful in RSS.
-		_capDiagnosticList(RBDs, deepcopy( (data, txlist, share.get('blkdata', None), workMerkleTree, share, wld) ))
+		RBDs.append( deepcopy( (data, txlist, share.get('blkdata', None), workMerkleTree, share, wld) ) )
 		if not moden:
 			payload = assembleBlock(data, txlist)
 		else:
@@ -690,8 +644,7 @@ def checkShare(share):
 			else:
 				payload += assembleBlock(data, txlist)[80:]
 		logfunc('Real block payload: %s' % (b2a_hex(payload).decode('utf8'),))
-		# Bluedragon memory leak fix: cap diagnostic list size.
-		_capDiagnosticList(RBPs, payload)
+		RBPs.append(payload)
 		threading.Thread(target=blockSubmissionThread, args=(payload, blkhash, share)).start()
 		bcnode.submitBlock(payload)
 		if config.DelayLogForUpstream:
@@ -745,9 +698,6 @@ def checkShare(share):
 			raise RejectedShare('high-hash')
 
 	shareTimestamp = unpack('<L', data[68:72])[0]
-	# REVERTED to original no-op form (see IsJobValid comment above for
-	# the post-mortem). The "correct" comparison rejected too much
-	# legitimate live work in production.
 	if shareTime < issueT - config.StaleWorkTimeout:
 		raise RejectedShare('stale-work')
 	if shareTimestamp < shareTime - 300:
