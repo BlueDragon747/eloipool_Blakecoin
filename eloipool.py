@@ -415,6 +415,15 @@ authenticators = []
 RBDs = []
 RBPs = []
 
+# Bluedragon memory leak fix: cap the unbounded diagnostic lists that
+# accumulate every submitted/rejected block forever. Long-running pool
+# instances eventually OOM as RBDs/RBPs/RBFs hold deepcopied shares.
+MAX_DIAGNOSTIC_ENTRIES = 10
+def _capDiagnosticList(lst, entry, cap=MAX_DIAGNOSTIC_ENTRIES):
+	lst.append(entry)
+	if len(lst) > cap:
+		del lst[:len(lst) - cap]
+
 from bitcoin.varlen import varlenEncode, varlenDecode
 import bitcoin.txn
 from merklemaker import assembleBlock
@@ -469,7 +478,8 @@ def blockSubmissionThread(payload, blkhash, share):
 					RaiseRedFlags(gbterr_fmt)
 					nexterr = now + 5
 				if MM.currentBlock[0] not in myblock and tries > len(servers):
-					RBFs.append( (('next block', MM.currentBlock, now, (gbterr, gmperr)), payload, blkhash, share) )
+					# Bluedragon memory leak fix
+					_capDiagnosticList(RBFs, (('next block', MM.currentBlock, now, (gbterr, gmperr)), payload, blkhash, share))
 					RaiseRedFlags('Giving up on submitting block to upstream \'%s\'' % (TS['name'],))
 					if share['upstreamRejectReason'] is PendingUpstream:
 						share['upstreamRejectReason'] = 'GAVE UP'
@@ -488,7 +498,8 @@ def blockSubmissionThread(payload, blkhash, share):
 				# no big deal
 				blockSubmissionThread.logger.debug(msg)
 			else:
-				RBFs.append( (('upstream reject', reason, time()), payload, blkhash, share) )
+				# Bluedragon memory leak fix
+				_capDiagnosticList(RBFs, (('upstream reject', reason, time()), payload, blkhash, share))
 				RaiseRedFlags(msg)
 		else:
 			blockSubmissionThread.logger.debug('Upstream \'%s\' accepted block' % (TS['name'],))
@@ -634,7 +645,8 @@ def checkShare(share):
 	
 	if parent_valid:
 		logfunc("Submitting upstream")
-		RBDs.append( deepcopy( (data, txlist, share.get('blkdata', None), workMerkleTree, share, wld) ) )
+		# Bluedragon memory leak fix
+		_capDiagnosticList(RBDs, deepcopy( (data, txlist, share.get('blkdata', None), workMerkleTree, share, wld) ))
 		if not moden:
 			payload = assembleBlock(data, txlist)
 		else:
@@ -644,7 +656,8 @@ def checkShare(share):
 			else:
 				payload += assembleBlock(data, txlist)[80:]
 		logfunc('Real block payload: %s' % (b2a_hex(payload).decode('utf8'),))
-		RBPs.append(payload)
+		# Bluedragon memory leak fix
+		_capDiagnosticList(RBPs, payload)
 		threading.Thread(target=blockSubmissionThread, args=(payload, blkhash, share)).start()
 		bcnode.submitBlock(payload)
 		if config.DelayLogForUpstream:
