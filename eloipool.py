@@ -527,8 +527,9 @@ def checkData(share, wld):
 	if data[0:4] != MT.MP['_BlockVersionBytes']:
 		raise RejectedShare('bad-version')
 
-def buildStratumData(share, merkleroot, versionbytes):
-	(prevBlock, height, bits) = MM.currentBlock
+def buildStratumData(share, merkleroot, versionbytes, prevBlock=None, bits=None):
+	if prevBlock is None or bits is None:
+		(prevBlock, height, bits) = MM.currentBlock
 	
 	data = versionbytes
 	data += prevBlock
@@ -606,15 +607,25 @@ def checkShare(share):
 	
 	share['issuetime'] = issueT
 	
-	(workMerkleTree, workCoinbase) = wld[1:3]
+	(workMerkleTree, workCoinbase, workPrevBlock, workBits) = wld[1:5]
 	share['merkletree'] = workMerkleTree
 	if 'jobid' in share:
 		cbtxn = deepcopy(workMerkleTree.data[0])
 		coinbase = workCoinbase + share['extranonce1'] + share['extranonce2']
 		cbtxn.setCoinbase(coinbase)
 		cbtxn.assemble()
-		data = buildStratumData(share, workMerkleTree.withFirst(cbtxn), workMerkleTree.MP['_BlockVersionBytes'])
+		data = buildStratumData(
+			share,
+			workMerkleTree.withFirst(cbtxn),
+			workMerkleTree.MP['_BlockVersionBytes'],
+			workPrevBlock,
+			workBits,
+		)
 		shareMerkleRoot = data[36:68]
+		if workPrevBlock != MM.currentBlock[0]:
+			if workPrevBlock == MM.lastBlock[0]:
+				raise RejectedShare('stale-prevblk')
+			raise RejectedShare('bad-prevblk')
 	
 	if data in DupeShareHACK:
 		raise RejectedShare('duplicate')
