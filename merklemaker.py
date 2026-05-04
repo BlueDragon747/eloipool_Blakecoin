@@ -633,14 +633,16 @@ class merkleMaker(threading.Thread):
 		self.logger.debug('Updating merkle tree with template from \'%s\'' % (BestMT.source,))
 		MP = BestMT.MP
 		blkbasics = (MP['_prevBlock'], MP['height'], MP['_bits'])
-		if blkbasics != self.currentBlock:
+		BlockChanged = blkbasics != self.currentBlock
+		if BlockChanged:
 			self.updateBlock(*blkbasics, _HBH=(MP['previousblockhash'], MP['bits']))
 		self.currentMerkleTree = BestMT
 		FirstTemplate = not hasattr(self.curClearMerkleTree, 'MP')
 		self.UpdateClearMerkleTree(self.curClearMerkleTree, MP)
 		self.UpdateClearMerkleTree(self.nextMerkleTree, MP)
-		if FirstTemplate:
-			# This was skipped until we had MP info, so do it now
+		if BlockChanged or FirstTemplate:
+			# This must run after the clear templates have MP info, otherwise
+			# clean stratum jobs can be built from stale template state.
 			self.onBlockChange()
 	
 	def _updateMerkleTree(self):
