@@ -162,11 +162,22 @@ server = None
 stratumsrv = None
 def updateBlocks():
 	server.wakeLongpoll()
-	# Bluedragon memory leak fix: pass wantClear=True so the stratum
-	# server invalidates outstanding jobs on chain-tip change instead
-	# of leaving stale work in flight (paired with the stratumserver
-	# try/finally so the next update reschedule still fires on error).
-	stratumsrv.updateJob(wantClear=True)
+	# REVERTED: BlueDragon's patch passed wantClear=True here, which
+	# tells stratum to send `clean_jobs=true` to miners on every
+	# chain-tip change. On Blakecoin's fast block rate (~30-90s) and
+	# with sgminer-driven ASICs (Baikal BK-B in particular), the
+	# clean-jobs storm caused a 1-3s transition window per chain tip
+	# where the miner discards in-flight nonce ranges and reconfigures.
+	# Shares submitted in that window slip past prevblk/duplicate
+	# checks but fail the bdiff-1 floor (`H-not-zero`). Live ops
+	# observed reject rate of 5% pre-patch jump to 63%+ over the
+	# subsequent ~3 hours as vardiff drifted into the floor zone.
+	#
+	# Keeping wantClear=False (the default) restores miners' natural
+	# job-flow: they adopt the new job but finish in-flight work
+	# without panic. Memory-leak fix + stratumserver try/finally
+	# stay in place; only this one half of the patch reverts.
+	stratumsrv.updateJob()
 
 def blockChanged():
 	global MM, networkTarget, server
@@ -555,11 +566,20 @@ def IsJobValid(wli, wluser = None):
 	if wli not in workLog[wluser]:
 		return False
 	(wld, issueT) = workLog[wluser][wli]
-	# Bluedragon memory leak fix: was `time() < issueT - StaleWorkTimeout`
-	# which inverts the staleness check (becomes true only when the
-	# work was issued FROM THE FUTURE, i.e. never). Should reject when
-	# now is more than StaleWorkTimeout after the issue time.
-	if time() > issueT + config.StaleWorkTimeout:
+	# REVERTED to the original no-op form. The "fixed" comparison
+	# (`time() > issueT + StaleWorkTimeout`) caused a 63% reject rate
+	# on a live BK-B miner once shipped — `issueT` semantics aren't
+	# what the BlueDragon patch author assumed, so a lot of in-flight
+	# valid work was arriving outside the window and getting rejected
+	# as stale. Pre-fix this branch is effectively unreachable (only
+	# true if the system clock ran backwards by > StaleWorkTimeout
+	# seconds), so all work passes the check. That tolerates a small-
+	# but-real risk of stale-work upstream submissions (the occasional
+	# `high-hash` rejection from the daemon), but the cost of that is
+	# far smaller than blowing up the legitimate share rate. If we
+	# want a real staleness check it needs a separate audit of issueT
+	# semantics + a controlled test before re-enabling.
+	if time() < issueT - config.StaleWorkTimeout:
 		return False
 	return True
 
@@ -725,10 +745,10 @@ def checkShare(share):
 			raise RejectedShare('high-hash')
 
 	shareTimestamp = unpack('<L', data[68:72])[0]
-	# Bluedragon memory leak fix: same staleness-check inversion as
-	# IsJobValid above. Reject when share arrives more than
-	# StaleWorkTimeout AFTER the work was issued.
-	if shareTime > issueT + config.StaleWorkTimeout:
+	# REVERTED to original no-op form (see IsJobValid comment above for
+	# the post-mortem). The "correct" comparison rejected too much
+	# legitimate live work in production.
+	if shareTime < issueT - config.StaleWorkTimeout:
 		raise RejectedShare('stale-work')
 	if shareTimestamp < shareTime - 300:
 		raise RejectedShare('time-too-old')
