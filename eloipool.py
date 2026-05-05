@@ -547,8 +547,12 @@ def IsJobValid(wli, wluser = None):
 	if wli not in workLog[wluser]:
 		return False
 	(wld, issueT) = workLog[wluser][wli]
-	if time() < issueT - config.StaleWorkTimeout:
-		return False
+	# BlueDragon merge-mining: don't reject stale-on-parent work.
+	# Work that's stale on the parent chain may still be valid for
+	# one of the merge-mined aux chains, so we stay greedy and skip
+	# the stale-work bail. (Upstream eloipool would do
+	#     if time() > issueT + config.StaleWorkTimeout: return False
+	# here.)
 	return True
 
 def LookupWork(username, wli):
@@ -722,8 +726,12 @@ def checkShare(share):
 			raise RejectedShare('high-hash')
 
 	shareTimestamp = unpack('<L', data[68:72])[0]
-	if shareTime < issueT - config.StaleWorkTimeout:
-		raise RejectedShare('stale-work')
+	# BlueDragon merge-mining: skip the stale-on-parent check here too —
+	# work older than StaleWorkTimeout on the parent chain may still be
+	# valid for an aux chain. (Upstream eloipool would do
+	#     if shareTime > issueT + config.StaleWorkTimeout:
+	#         raise RejectedShare('stale-work')
+	# here.)
 	if shareTimestamp < shareTime - 300:
 		raise RejectedShare('time-too-old')
 	if shareTimestamp > shareTime + 7200:
