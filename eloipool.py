@@ -495,8 +495,9 @@ def IsJobValid(wli, wluser = None):
 	if wli not in workLog[wluser]:
 		return False
 	(wld, issueT) = workLog[wluser][wli]
-	if time() > issueT + config.StaleWorkTimeout:
-		return False
+    #as we want to be greedy and work could be valid on one of the coins in the merge disable stale work check
+	#if time() > issueT + config.StaleWorkTimeout:
+		#return False
 	return True
 
 def LookupWork(username, wli):
@@ -638,8 +639,9 @@ def checkShare(share):
 	share['_targethex'] = '%064x' % (workTarget,)
 	
 	shareTimestamp = unpack('<L', data[68:72])[0]
-	if shareTime > issueT + config.StaleWorkTimeout:
-		raise RejectedShare('stale-work')
+    #as we want to be greedy and work could be valid on one of the coins in the merge disable stale work check
+	#if shareTime > issueT + config.StaleWorkTimeout:
+		#raise RejectedShare('stale-work')
 	if shareTimestamp < shareTime - 300:
 		raise RejectedShare('time-too-old')
 	if shareTimestamp > shareTime + 7200:
