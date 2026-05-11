@@ -58,10 +58,71 @@ AUX_SOLVER_CACHE_TTL = 1
 
 # Chain name mapping for logging (matches database naming)
 CHAIN_NAMES = {0: 'MM', 1: 'MM1', 2: 'MM3', 3: 'MM4', 4: 'MM5'}
+VERSIONBITS_TOP_MASK = 0xE0000000
+VERSIONBITS_TOP_BITS = 0x20000000
+AUXPOW_VERSION_BIT = 8
+CHAIN_ID_START_BIT = 16
+CHAIN_ID_END_BIT = 23
+IGNORED_SIGNAL_BITS = {4, AUXPOW_VERSION_BIT}
+KNOWN_VERSIONBIT_NAMES = {
+    0: 'csv',
+    1: 'segwit',
+    2: 'taproot',
+}
 
 def get_chain_name(chain_idx):
     """Get display name for chain index"""
     return CHAIN_NAMES.get(chain_idx, 'MM%d' % chain_idx)
+
+
+def summarize_aux_version_bits(aux_block, default_chain_id=None):
+    """Format aux template version fields into a readable signal summary."""
+    raw_version = aux_block.get('version')
+    version_hex = aux_block.get('versionHex')
+
+    if raw_version is None and version_hex is None:
+        return None
+
+    try:
+        if raw_version is None:
+            raw_version = int(str(version_hex), 16)
+        else:
+            raw_version = int(raw_version)
+    except (TypeError, ValueError):
+        if version_hex is None:
+            version_hex = str(raw_version)
+        return "version=%s" % (version_hex,)
+
+    if version_hex is None:
+        version_hex = "%08x" % (raw_version & 0xffffffff,)
+    else:
+        version_hex = str(version_hex)
+
+    chain_id = aux_block.get('chainid', default_chain_id)
+    if chain_id is None:
+        chain_id = (raw_version >> CHAIN_ID_START_BIT) & 0xff
+
+    top_mode = 'bip9' if (raw_version & VERSIONBITS_TOP_MASK) == VERSIONBITS_TOP_BITS else 'legacy'
+    auxpow_enabled = 'yes' if (raw_version & (1 << AUXPOW_VERSION_BIT)) else 'no'
+
+    signal_bits = []
+    if top_mode == 'bip9':
+        ignored_bits = set(IGNORED_SIGNAL_BITS)
+        ignored_bits.update(range(CHAIN_ID_START_BIT, CHAIN_ID_END_BIT + 1))
+        for bit in range(29):
+            if bit in ignored_bits:
+                continue
+            if raw_version & (1 << bit):
+                signal_bits.append(KNOWN_VERSIONBIT_NAMES.get(bit, 'bit%d' % bit))
+
+    signals = ','.join(signal_bits) if signal_bits else 'none'
+    return "version=%s top=%s auxpow=%s chain_id=%s signals=%s" % (
+        version_hex,
+        top_mode,
+        auxpow_enabled,
+        chain_id,
+        signals,
+    )
 
 
 @defer.inlineCallbacks
@@ -390,6 +451,7 @@ class Listener(Server):
             raise ValueError('Too many aux payout addresses supplied')
         self.chain_ids = [None for i in auxs]
         self.aux_targets = [None for i in auxs]
+        self.last_aux_version_summary = {}
         self.chain_health = {}  # chain_idx -> {'healthy': bool, 'last_success': time, 'failures': count}
         self.per_solver_cache = {}
         self.merkle_size = merkle_size
@@ -726,7 +788,14 @@ class Listener(Server):
                 self.chain_ids[chain] = aux_block.get('chainid', chain)
                 aux_block_hashes[chain] = aux_block_hash
                 self.aux_targets[chain] = reverse_chunks(aux_block['target'], 2)
-                logger.debug("%s: Got aux block hash=%s", get_chain_name(chain), aux_block_hash[:16])
+                aux_version_summary = summarize_aux_version_bits(aux_block, default_chain_id=self.chain_ids[chain])
+                if aux_version_summary is not None:
+                    if self.last_aux_version_summary.get(chain) != aux_version_summary:
+                        logger.info("%s: aux template %s", get_chain_name(chain), aux_version_summary)
+                        self.last_aux_version_summary[chain] = aux_version_summary
+                    logger.debug("%s: Got aux block hash=%s %s", get_chain_name(chain), aux_block_hash[:16], aux_version_summary)
+                else:
+                    logger.debug("%s: Got aux block hash=%s", get_chain_name(chain), aux_block_hash[:16])
                 self._mark_chain_healthy(chain)
                 healthy_count += 1
             except Exception as e:
@@ -959,7 +1028,26 @@ class Listener(Server):
                     chain_merkle_index = self.calc_merkle_index(chain, merkle_nonce)
                 
                 if chain_merkle_index is not None:
-                    branch = self.merkle_branch(chain_merkle_index, merkle_tree)
+                    if chain_merkle_index >= len(merkle_tree):
+                        logger.warning(
+                            "%s: stale aux merkle root %s has no leaf for index %s; skipping share",
+                            get_chain_name(chain),
+                            merkle_root[:16],
+                            chain_merkle_index,
+                        )
+                        stale_aux_submission = True
+                        continue
+                    try:
+                        branch = self.merkle_branch(chain_merkle_index, merkle_tree)
+                    except IndexError:
+                        logger.warning(
+                            "%s: stale aux merkle root %s has incomplete branch for index %s; skipping share",
+                            get_chain_name(chain),
+                            merkle_root[:16],
+                            chain_merkle_index,
+                        )
+                        stale_aux_submission = True
+                        continue
                     auxpow = coinbaseMerkle + '%02x' % (len(branch),)
                     for mb in branch:
                         auxpow += b2a_hex(a2b_hex(mb.encode())[::-1]).decode()
