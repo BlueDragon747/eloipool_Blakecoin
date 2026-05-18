@@ -104,7 +104,14 @@ DATA_ROOT="${DATA_ROOT:-/var/lib/blakestream-${NETWORK_TAG}}"
 LOG_ROOT="${LOG_ROOT:-/var/log/blakestream-${NETWORK_TAG}}"
 RUN_USER="${RUN_USER:-blakestream}"
 RUN_GROUP="${RUN_GROUP:-blakestream}"
-PUBLIC_HOST="${PUBLIC_HOST:-$HOST}"
+if [ -z "${PUBLIC_HOST:-}" ]; then
+    if [ "$RUN_LOCAL" = "1" ]; then
+        PUBLIC_HOST="$(ip route get 1.1.1.1 2>/dev/null | awk 'NR==1{for(i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')"
+        PUBLIC_HOST="${PUBLIC_HOST:-$HOST}"
+    else
+        PUBLIC_HOST="$HOST"
+    fi
+fi
 STRATUM_PORT="${STRATUM_PORT:-3334}"
 DASHBOARD_PORT="${DASHBOARD_PORT:-18081}"
 POOL_JSONRPC_PORT="${POOL_JSONRPC_PORT:-19334}"
@@ -1224,7 +1231,7 @@ fi
 say "Collecting live status summary"
 REMOTE_SUMMARY="$(
     run_ssh \
-        "INSTALL_ROOT=$(quote_remote "$INSTALL_ROOT") RPC_USER=$(quote_remote "$NODE_RPC_USER") RPC_PASSWORD=$(quote_remote "$NODE_RPC_PASS") LOG_ROOT=$(quote_remote "$LOG_ROOT") RPC_PORT_BLC=$(quote_remote "$RPC_PORT_BLC") RPC_PORT_BBTC=$(quote_remote "$RPC_PORT_BBTC") RPC_PORT_ELT=$(quote_remote "$RPC_PORT_ELT") RPC_PORT_LIT=$(quote_remote "$RPC_PORT_LIT") RPC_PORT_PHO=$(quote_remote "$RPC_PORT_PHO") RPC_PORT_UMO=$(quote_remote "$RPC_PORT_UMO") ENABLE_CPU_MINER=$(quote_remote "$ENABLE_CPU_MINER") bash -s" <<'REMOTE'
+        "INSTALL_ROOT=$(quote_remote "$INSTALL_ROOT") RPC_USER=$(quote_remote "$NODE_RPC_USER") RPC_PASSWORD=$(quote_remote "$NODE_RPC_PASS") LOG_ROOT=$(quote_remote "$LOG_ROOT") RPC_PORT_BLC=$(quote_remote "$RPC_PORT_BLC") RPC_PORT_BBTC=$(quote_remote "$RPC_PORT_BBTC") RPC_PORT_ELT=$(quote_remote "$RPC_PORT_ELT") RPC_PORT_LIT=$(quote_remote "$RPC_PORT_LIT") RPC_PORT_PHO=$(quote_remote "$RPC_PORT_PHO") RPC_PORT_UMO=$(quote_remote "$RPC_PORT_UMO") ENABLE_CPU_MINER=$(quote_remote "$ENABLE_CPU_MINER") NETWORK_MODE=$(quote_remote "$NETWORK_MODE") bash -s" <<'REMOTE'
 set -euo pipefail
 rpc() { "${INSTALL_ROOT}/bin/rpc_call.py" "$1" "$2"; }
 printf 'Blakecoin height: %s\n' "$(rpc "${RPC_PORT_BLC}" getblockcount)"
