@@ -28,24 +28,49 @@ import traceback
 _logger = logging.getLogger('sharelogging.logfile')
 
 class logfile(threading.Thread):
+	DEFAULT_QUEUE_MAXSIZE = 10000
+	DROP_WARN_INTERVAL = 60
+
 	def __init__(self, filename, **ka):
 		super().__init__(**ka.get('thropts', {}))
 		self.fn=filename
 		if 'format' not in ka:
-			_logger.warn('"format" not specified for logfile logger, but default may vary!')
+			_logger.warning('"format" not specified for logfile logger, but default may vary!')
 			ka['format'] = "{time} {Q(remoteHost)} {username} {YN(not(rejectReason))} {dash(YN(upstreamResult))} {dash(rejectReason)} {solution} {target2pdiff(target)}\n"
 		self.fmt = shareLogFormatter(ka['format'], '%s')
+		self.max_queue_size = int(ka.get('max_queue_size', ka.get('queue_maxsize', self.DEFAULT_QUEUE_MAXSIZE)))
+		if self.max_queue_size < 1:
+			self.max_queue_size = 1
 		self.queue = deque()
-		self.start()
+		self._queue_lock = threading.Lock()
+		self.dropped = 0
+		self._last_drop_warning = 0
+		if ka.get('autostart', True):
+			self.start()
 	
 	def queueshare(self, line):
-		self.queue.append(line)
+		with self._queue_lock:
+			if len(self.queue) >= self.max_queue_size:
+				self.queue.popleft()
+				self.dropped += 1
+				now = time()
+				if now >= self._last_drop_warning + self.DROP_WARN_INTERVAL:
+					_logger.warning(
+						'logfile queue full for %s; dropped %d oldest share log line(s)',
+						self.fn,
+						self.dropped,
+					)
+					self._last_drop_warning = now
+			self.queue.append(line)
 	
 	def flushlog(self):
-		if len(self.queue) > 0:
-			with open(self.fn, "a") as logfile:
-				while len(self.queue)>0:
-					logfile.write(self.queue.popleft())
+		with self._queue_lock:
+			if not self.queue:
+				return
+			lines = list(self.queue)
+			self.queue.clear()
+		with open(self.fn, "a") as logfile:
+			logfile.writelines(lines)
 	
 	def run(self):
 		while True:

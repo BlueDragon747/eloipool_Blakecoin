@@ -243,11 +243,22 @@ else:
 	if not hasattr(config, 'DynamicTargetQuick'):
 		config.DynamicTargetQuick = True
 
+def _redactedGotworkURI():
+	uri = getattr(config, 'GotWorkURI', 'configured gotwork endpoint')
+	if '://' in uri and '@' in uri:
+		scheme, rest = uri.split('://', 1)
+		return '%s://<redacted>@%s' % (scheme, rest.rsplit('@', 1)[-1])
+	return uri
+
 def submitGotwork(info):
 	try:
 		gotwork.gotwork(info)
-	except:
-		checkShare.logger.warning('Failed to submit gotwork\n' + traceback.format_exc())
+	except Exception as e:
+		checkShare.logger.warning(
+			'Gotwork submit failed: merged-mining proxy unavailable at %s (%s: %s)'
+			% (_redactedGotworkURI(), e.__class__.__name__, e)
+		)
+		checkShare.logger.debug('Gotwork submit traceback\n' + traceback.format_exc())
 
 def getGotworkCoinbaseAux(username):
 	if not gotwork or not username:
@@ -415,6 +426,15 @@ authenticators = []
 RBDs = []
 RBPs = []
 
+# Bluedragon memory leak fix: cap the unbounded diagnostic lists that
+# accumulate every submitted/rejected block forever. Long-running pool
+# instances eventually OOM as RBDs/RBPs/RBFs hold deepcopied shares.
+MAX_DIAGNOSTIC_ENTRIES = 10
+def _capDiagnosticList(lst, entry, cap=MAX_DIAGNOSTIC_ENTRIES):
+	lst.append(entry)
+	if len(lst) > cap:
+		del lst[:len(lst) - cap]
+
 from bitcoin.varlen import varlenEncode, varlenDecode
 import bitcoin.txn
 from merklemaker import assembleBlock
@@ -469,7 +489,8 @@ def blockSubmissionThread(payload, blkhash, share):
 					RaiseRedFlags(gbterr_fmt)
 					nexterr = now + 5
 				if MM.currentBlock[0] not in myblock and tries > len(servers):
-					RBFs.append( (('next block', MM.currentBlock, now, (gbterr, gmperr)), payload, blkhash, share) )
+					# Bluedragon memory leak fix
+					_capDiagnosticList(RBFs, (('next block', MM.currentBlock, now, (gbterr, gmperr)), payload, blkhash, share))
 					RaiseRedFlags('Giving up on submitting block to upstream \'%s\'' % (TS['name'],))
 					if share['upstreamRejectReason'] is PendingUpstream:
 						share['upstreamRejectReason'] = 'GAVE UP'
@@ -488,7 +509,8 @@ def blockSubmissionThread(payload, blkhash, share):
 				# no big deal
 				blockSubmissionThread.logger.debug(msg)
 			else:
-				RBFs.append( (('upstream reject', reason, time()), payload, blkhash, share) )
+				# Bluedragon memory leak fix
+				_capDiagnosticList(RBFs, (('upstream reject', reason, time()), payload, blkhash, share))
 				RaiseRedFlags(msg)
 		else:
 			blockSubmissionThread.logger.debug('Upstream \'%s\' accepted block' % (TS['name'],))
@@ -516,8 +538,9 @@ def checkData(share, wld):
 	if data[0:4] != MT.MP['_BlockVersionBytes']:
 		raise RejectedShare('bad-version')
 
-def buildStratumData(share, merkleroot, versionbytes):
-	(prevBlock, height, bits) = MM.currentBlock
+def buildStratumData(share, merkleroot, versionbytes, prevBlock=None, bits=None):
+	if prevBlock is None or bits is None:
+		(prevBlock, height, bits) = MM.currentBlock
 	
 	data = versionbytes
 	data += prevBlock
@@ -535,8 +558,12 @@ def IsJobValid(wli, wluser = None):
 	if wli not in workLog[wluser]:
 		return False
 	(wld, issueT) = workLog[wluser][wli]
-	if time() < issueT - config.StaleWorkTimeout:
-		return False
+	# BlueDragon merge-mining: don't reject stale-on-parent work.
+	# Work that's stale on the parent chain may still be valid for
+	# one of the merge-mined aux chains, so we stay greedy and skip
+	# the stale-work bail. (Upstream eloipool would do
+	#     if time() > issueT + config.StaleWorkTimeout: return False
+	# here.)
 	return True
 
 def LookupWork(username, wli):
@@ -595,15 +622,25 @@ def checkShare(share):
 	
 	share['issuetime'] = issueT
 	
-	(workMerkleTree, workCoinbase) = wld[1:3]
+	(workMerkleTree, workCoinbase, workPrevBlock, workBits) = wld[1:5]
 	share['merkletree'] = workMerkleTree
 	if 'jobid' in share:
 		cbtxn = deepcopy(workMerkleTree.data[0])
 		coinbase = workCoinbase + share['extranonce1'] + share['extranonce2']
 		cbtxn.setCoinbase(coinbase)
 		cbtxn.assemble()
-		data = buildStratumData(share, workMerkleTree.withFirst(cbtxn), workMerkleTree.MP['_BlockVersionBytes'])
+		data = buildStratumData(
+			share,
+			workMerkleTree.withFirst(cbtxn),
+			workMerkleTree.MP['_BlockVersionBytes'],
+			workPrevBlock,
+			workBits,
+		)
 		shareMerkleRoot = data[36:68]
+		if workPrevBlock != MM.currentBlock[0]:
+			if workPrevBlock == MM.lastBlock[0]:
+				raise RejectedShare('stale-prevblk')
+			raise RejectedShare('bad-prevblk')
 	
 	if data in DupeShareHACK:
 		raise RejectedShare('duplicate')
@@ -634,7 +671,8 @@ def checkShare(share):
 	
 	if parent_valid:
 		logfunc("Submitting upstream")
-		RBDs.append( deepcopy( (data, txlist, share.get('blkdata', None), workMerkleTree, share, wld) ) )
+		# Bluedragon memory leak fix
+		_capDiagnosticList(RBDs, deepcopy( (data, txlist, share.get('blkdata', None), workMerkleTree, share, wld) ))
 		if not moden:
 			payload = assembleBlock(data, txlist)
 		else:
@@ -644,7 +682,8 @@ def checkShare(share):
 			else:
 				payload += assembleBlock(data, txlist)[80:]
 		logfunc('Real block payload: %s' % (b2a_hex(payload).decode('utf8'),))
-		RBPs.append(payload)
+		# Bluedragon memory leak fix
+		_capDiagnosticList(RBPs, payload)
 		threading.Thread(target=blockSubmissionThread, args=(payload, blkhash, share)).start()
 		bcnode.submitBlock(payload)
 		if config.DelayLogForUpstream:
@@ -698,8 +737,12 @@ def checkShare(share):
 			raise RejectedShare('high-hash')
 
 	shareTimestamp = unpack('<L', data[68:72])[0]
-	if shareTime < issueT - config.StaleWorkTimeout:
-		raise RejectedShare('stale-work')
+	# BlueDragon merge-mining: skip the stale-on-parent check here too —
+	# work older than StaleWorkTimeout on the parent chain may still be
+	# valid for an aux chain. (Upstream eloipool would do
+	#     if shareTime > issueT + config.StaleWorkTimeout:
+	#         raise RejectedShare('stale-work')
+	# here.)
 	if shareTimestamp < shareTime - 300:
 		raise RejectedShare('time-too-old')
 	if shareTimestamp > shareTime + 7200:
@@ -1049,6 +1092,8 @@ if __name__ == "__main__":
 	server.ShareTarget = config.ShareTarget
 	server.StaleWorkTimeout = config.StaleWorkTimeout
 	server.checkAuthentication = checkAuthentication
+	if hasattr(config, 'SocketWriteBufferMax'):
+		server.MaxWriteBuffer = config.SocketWriteBufferMax
 	
 	if hasattr(config, 'TrustedForwarders'):
 		server.TrustedForwarders = config.TrustedForwarders
@@ -1064,6 +1109,8 @@ if __name__ == "__main__":
 	stratumsrv.IsJobValid = IsJobValid
 	stratumsrv.checkAuthentication = checkAuthentication
 	stratumsrv.WorkUpdateInterval = config.WorkUpdateInterval
+	if hasattr(config, 'SocketWriteBufferMax'):
+		stratumsrv.MaxWriteBuffer = config.SocketWriteBufferMax
 	if not hasattr(config, 'StratumAddresses'):
 		config.StratumAddresses = ()
 	for a in config.StratumAddresses:

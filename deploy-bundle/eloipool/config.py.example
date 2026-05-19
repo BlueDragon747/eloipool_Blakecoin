@@ -162,6 +162,9 @@ WorkQueueSizeLongpoll = (0x1000, 0x2000)
 # How often to send new jobs to miners
 WorkUpdateInterval = 55
 
+# Maximum queued outbound bytes per socket before a slow client is disconnected.
+SocketWriteBufferMax = 1048576
+
 # How long to wait between bitcoind GBT updates normally
 MinimumTxnUpdateWait = 5
 
@@ -287,6 +290,7 @@ ShareLogging = (
 	{
 		'type': 'logfile',
 		'filename': 'share-logfile',
+		'max_queue_size': 10000,
 		'format': "{time} {Q(remoteHost)} {username} {YN(not(rejectReason))} {dash(YN(upstreamResult))} {dash(rejectReason)} {dash(target2bdiff(target))} {dash(_targethex)} {solution}\n",
 	},
 	{

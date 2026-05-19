@@ -31,26 +31,51 @@ bash deploy-bundle/deploy.sh <host> [user] [password]
 
 ## Full Six-Chain Deploy
 
-For the full six-chain deploy entrypoint, use:
+For a normal local deploy from a cloned repo on the VPS, use:
 
 ```bash
 cd /path/to/Blakestream-Eliopool-15.21
-bash deploy-bundle/deploy-full-stack.sh -local
+bash deploy-bundle/deploy-full-stack.sh
 ```
 
-or:
+To pull published daemon images instead of building coin daemons from source:
 
 ```bash
 cd /path/to/Blakestream-Eliopool-15.21
-bash deploy-bundle/deploy-full-stack.sh -pull
+bash deploy-bundle/deploy-full-stack.sh --pull
 ```
 
-`deploy-full-stack.sh` supports only 2 daemon modes:
+Remote deploy from a workstation is still available:
 
-- `-local` builds the six coin daemons from source on the VPS
-- `-pull` pulls the published `sidgrip/<coin>:15.21` daemon images on the VPS
+```bash
+cd /path/to/Blakestream-Eliopool-15.21
+bash deploy-bundle/deploy-full-stack.sh root@your-vps
+```
+
+Remote smoke test without changing the server:
+
+```bash
+cd /path/to/Blakestream-Eliopool-15.21
+bash deploy-bundle/deploy-full-stack.sh root@your-vps --dry-run
+```
+
+`deploy-full-stack.sh` supports 2 daemon modes:
+
+- default / `--local` builds the six coin daemons from source on the target
+- `--pull` pulls the published `sidgrip/<coin>:15.21` daemon images on the target
 
 By default, the script deploys `mainnet`.
+Mainnet bootstrap downloads are enabled by default and run in the background
+while daemon binaries are built or pulled. Use `--no-bootstrap` to rely only on
+p2p sync.
+
+After the bootstrap files are staged, the mainnet full-stack deploy performs a
+solo sync rotation by default. It starts one primary daemon, imports
+`bootstrap.dat`, catches up to the network tip, gracefully stops that daemon,
+then moves to the next coin. After all six are synced and stopped, it starts
+the final primary + local peer daemon pairs one coin at a time and then starts
+the pool, proxy, and dashboard. Set `MAINNET_SYNC_ROTATION=false` only if you
+intentionally want to skip that safety rotation.
 
 Set one of these only when you want a different network:
 
@@ -61,6 +86,10 @@ Before deploying, it scans the target for existing BlakeStream systemd units,
 daemon processes, and Docker containers and prints a summary of what it found.
 That detection is informational only. The selected mode still controls the
 deploy.
+Existing managed services are stopped gracefully before redeploy. Coin datadirs
+are preserved.
+Use `--dry-run` to test SSH access, argument parsing, and existing-runtime
+detection before a real install.
 
 Important release settings:
 

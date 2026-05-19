@@ -118,8 +118,8 @@ TRACKER_ADDR  = os.environ.get('DASH_TRACKER_ADDR', '(unset)')
 STRATUM_HOST  = os.environ.get('DASH_STRATUM_HOST', socket.gethostname())
 STRATUM_PORT  = int(os.environ.get('DASH_STRATUM_PORT', '3334'))
 RUN_TIMESTAMP = os.environ.get('DASH_RUN_TIMESTAMP') or os.environ.get('RUN_TIMESTAMP', '')
-HEADER_TITLE = os.environ.get('DASH_HEADER_TITLE', 'BlakeStream Pool')
-HEADER_SUBTITLE = os.environ.get('DASH_HEADER_SUBTITLE', 'Blakestream-Eliopool-15.21')
+HEADER_TITLE = os.environ.get('DASH_HEADER_TITLE', 'Blakestream Eliopool')
+HEADER_SUBTITLE = os.environ.get('DASH_HEADER_SUBTITLE', '')
 COINBASER     = os.environ.get('DASH_COINBASER',    '/opt/blakecoin-pool/bin/coinbaser.py')
 HAS_COINBASER = os.path.isfile(COINBASER)
 CHAIN_TICKERS = getenv_json('DASH_CHAIN_TICKERS', {
@@ -307,6 +307,93 @@ def read_lines(path):
         return ['(log file not present yet)']
     except Exception as e:
         return [f'(error reading log: {e})']
+
+
+_SENSITIVE_LOG_PATTERNS = [
+    (
+        re.compile(r'([a-z][a-z0-9+.-]*://)([^/@\s:]+):([^/@\s]+)@', re.I),
+        r'\1<redacted>@',
+    ),
+    (
+        re.compile(r'\b((?:rpc)?pass(?:word)?|secret|token|auth|cookie|private[_ -]?key)\s*[:=]\s*([^\s,;]+)', re.I),
+        r'\1=<redacted>',
+    ),
+    (
+        re.compile(r'\bgh[pousr]_[A-Za-z0-9_]{20,}\b'),
+        '<redacted-token>',
+    ),
+]
+
+
+def redact_sensitive_log_text(text):
+    for pattern, replacement in _SENSITIVE_LOG_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def display_pool_log(lines):
+    """Collapse noisy known tracebacks before sending log rows to the UI."""
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if 'checkShare' not in line or 'Failed to submit gotwork' not in line:
+            out.append(redact_sensitive_log_text(line))
+            i += 1
+            continue
+
+        err = None
+        j = i + 1
+        while j < len(lines):
+            nxt = lines[j]
+            stripped = nxt.strip()
+            if re.match(r'^\d{4}-\d{2}-\d{2} ', nxt):
+                break
+            if re.match(r'^[A-Za-z_][A-Za-z0-9_]*(Error|Exception)?:', stripped):
+                err = stripped
+            j += 1
+
+        message = line.replace('Failed to submit gotwork', 'Gotwork submit failed: merged-mining proxy unavailable')
+        if err:
+            message = f'{message} ({err})'
+        out.append(redact_sensitive_log_text(message))
+        i = j
+    return out
+
+
+def build_chain_overview(parent_chain):
+    rows = []
+    for label in configured_chain_order():
+        info = parent_chain if label == 'Blakecoin' else chain_rpc(label, 'getblockchaininfo')
+        row = {
+            'label': label,
+            'ticker': CHAIN_TICKERS.get(label, label),
+        }
+        if not isinstance(info, dict) or info.get('_error'):
+            row.update({
+                'status': 'error',
+                'error': redact_sensitive_log_text(str(info.get('_error') if isinstance(info, dict) else info)),
+            })
+            rows.append(row)
+            continue
+
+        blocks = info.get('blocks')
+        headers = info.get('headers')
+        progress = info.get('verificationprogress')
+        row.update({
+            'status': 'synced' if blocks is not None and headers is not None and blocks >= headers else 'syncing',
+            'chain': info.get('chain'),
+            'blocks': blocks,
+            'headers': headers,
+            'verificationprogress': progress,
+            'difficulty': info.get('difficulty'),
+            'bestblockhash': info.get('bestblockhash'),
+        })
+        peers = parent_chain.get('connections') if label == 'Blakecoin' else chain_rpc(label, 'getconnectioncount')
+        if isinstance(peers, int):
+            row['connections'] = peers
+        rows.append(row)
+    return rows
 
 
 SOLVED_RE = re.compile(r'New block:\s+([0-9a-f]+) \(height: (\d+); bits: ([0-9a-f]+)\)')
@@ -751,7 +838,7 @@ def parse_share_line(line):
     }
 
 
-def parse_share_log(lines):
+def parse_share_log(lines, max_rows=15):
     """Normalize recent share-log lines for dashboard display."""
     out = []
     for line in lines:
@@ -787,7 +874,15 @@ def parse_share_log(lines):
             'status':   display_status,
             'reason':   display_reason,
         })
-    return out[-15:]
+    if max_rows is None:
+        return out
+    return out[-max_rows:]
+
+
+def _is_real_proxy_solve(solve):
+    if not solve:
+        return False
+    return bool(solve.get('parent_status') or solve.get('aux_chains'))
 
 
 def attach_share_chain_outcomes(shares, proxy_solves, max_lead=4.0, max_lag=0.5):
@@ -800,7 +895,7 @@ def attach_share_chain_outcomes(shares, proxy_solves, max_lead=4.0, max_lag=0.5)
         {
             **solve,
             '_matched': False,
-        } for solve in (proxy_solves or [])
+        } for solve in (proxy_solves or []) if _is_real_proxy_solve(solve)
     ]
 
     def match_solve(share_ts):
@@ -861,6 +956,133 @@ def attach_share_chain_outcomes(shares, proxy_solves, max_lead=4.0, max_lag=0.5)
             'proxy_matched': matched is not None,
         })
     return enriched
+
+
+def build_recent_solved_shares(share_lines, proxy_solves, max_rows=15, max_lead=4.0, max_lag=0.5):
+    """Return recent winning shares with per-chain block outcomes.
+
+    Normal accepted shares are intentionally excluded. This keeps the chain
+    chips meaningful: green/red only describe actual block submission results.
+    """
+    chain_order = configured_chain_order()
+    child_order = [label for label in chain_order if label != 'Blakecoin']
+    real_solves = [
+        solve for solve in (proxy_solves or [])
+        if _is_real_proxy_solve(solve) and solve.get('ts') is not None
+    ]
+    if not real_solves:
+        return []
+
+    recent_solves = real_solves[-max(max_rows * 3, 30):]
+    windows = sorted(
+        (solve['ts'] - max_lead, solve['ts'] + max_lag)
+        for solve in recent_solves
+    )
+    candidate_lines = []
+    for line in share_lines:
+        parts = line.split()
+        if len(parts) < 7:
+            continue
+        try:
+            share_ts = float(parts[0])
+        except ValueError:
+            continue
+
+        # Always keep parent-chain winners even if the proxy detail scrolled
+        # or the timestamp window misses by a little. For aux-only solves,
+        # keep only accepted rows close to recent proxy solve timestamps.
+        if parts[4] == 'Y':
+            candidate_lines.append(line)
+            continue
+        if parts[3] != 'Y':
+            continue
+        for start, end in windows:
+            if share_ts < start:
+                break
+            if share_ts <= end:
+                candidate_lines.append(line)
+                break
+
+    shares = parse_share_log(candidate_lines, max_rows=None)
+    if not shares:
+        return []
+
+    rows = []
+    used_share_idx = set()
+    share_times = [share.get('time') or 0 for share in shares]
+
+    for solve in recent_solves:
+        solve_ts = solve.get('ts')
+        best_idx = None
+        best_key = None
+        pos = bisect.bisect_left(share_times, solve_ts)
+        candidates = []
+        idx = pos - 1
+        while idx >= 0 and solve_ts - share_times[idx] <= max_lead:
+            candidates.append(idx)
+            idx -= 1
+        idx = pos
+        while idx < len(shares) and share_times[idx] - solve_ts <= max_lag:
+            candidates.append(idx)
+            idx += 1
+        for idx in candidates:
+            if idx in used_share_idx:
+                continue
+            share = shares[idx]
+            share_ts = share.get('time')
+            if share_ts is None:
+                continue
+            delta = solve_ts - share_ts
+            if delta < -max_lag or delta > max_lead:
+                continue
+            key = (0 if delta >= 0 else 1, abs(delta))
+            if best_key is None or key < best_key:
+                best_key = key
+                best_idx = idx
+        if best_idx is None:
+            continue
+
+        used_share_idx.add(best_idx)
+        share = shares[best_idx]
+        parent_status = solve.get('parent_status')
+        parent_accepted = share.get('upstream_result') or parent_status == 'parent-accepted'
+        accepted_labels = []
+        if parent_accepted:
+            accepted_labels.append('Blakecoin')
+        for label in child_order:
+            if label in (solve.get('aux_chains') or []):
+                accepted_labels.append(label)
+        accepted_set = set(accepted_labels)
+        accepted_labels = [label for label in chain_order if label in accepted_set]
+        rows.append({
+            **share,
+            'chains_attempted': list(chain_order),
+            'chains_accepted': accepted_labels,
+            'chains_rejected': [label for label in chain_order if label not in accepted_set],
+            'has_chain_outcomes': True,
+            'proxy_parent_status': parent_status,
+            'proxy_matched': True,
+        })
+
+    # Fallback: if the share log has a parent-chain solve but no proxy outcome
+    # close enough, still show the winning BLC share without inventing aux
+    # rejects from missing data.
+    seen_times = {row.get('time') for row in rows}
+    for share in shares:
+        if not share.get('upstream_result') or share.get('time') in seen_times:
+            continue
+        rows.append({
+            **share,
+            'chains_attempted': ['Blakecoin'],
+            'chains_accepted': ['Blakecoin'],
+            'chains_rejected': [],
+            'has_chain_outcomes': True,
+            'proxy_parent_status': None,
+            'proxy_matched': False,
+        })
+
+    rows.sort(key=lambda row: row.get('time') or 0)
+    return rows[-max_rows:]
 
 
 # ---------------------------------------------------------------------------
@@ -1192,45 +1414,47 @@ def attach_proxy_solves_cached(all_solved_blocks, proxy_solves):
 _PROXY_LOG_OFFSET = 0
 _PROXY_SOLVES_CACHE = []
 _PROXY_LOG_TAIL = b''  # leftover bytes from last read without a trailing \n
+_PROXY_SOLVES_LOCK = threading.Lock()
 
 
 def incremental_proxy_solves():
     global _PROXY_LOG_OFFSET, _PROXY_SOLVES_CACHE, _PROXY_LOG_TAIL
-    if not PROXY_LOG:
-        return []
-    try:
-        with open(PROXY_LOG, 'rb') as f:
-            f.seek(0, 2)
-            size = f.tell()
-            if size < _PROXY_LOG_OFFSET:
-                # Log rotated or truncated — reset and reparse from scratch
-                _PROXY_LOG_OFFSET = 0
-                _PROXY_SOLVES_CACHE = []
-                _PROXY_LOG_TAIL = b''
-            f.seek(_PROXY_LOG_OFFSET)
-            chunk = f.read(size - _PROXY_LOG_OFFSET)
-            _PROXY_LOG_OFFSET = size
-    except FileNotFoundError:
-        return _PROXY_SOLVES_CACHE
-    except Exception:
-        return _PROXY_SOLVES_CACHE
-    if not chunk:
-        return _PROXY_SOLVES_CACHE
-    data = _PROXY_LOG_TAIL + chunk
-    # Stash anything after the last newline for next pass so a line that
-    # arrives in two reads isn't split mid-regex.
-    if b'\n' in data:
-        last_nl = data.rfind(b'\n')
-        complete = data[:last_nl + 1]
-        _PROXY_LOG_TAIL = data[last_nl + 1:]
-    else:
-        _PROXY_LOG_TAIL = data
-        complete = b''
-    if complete:
-        new_lines = complete.decode('utf-8', errors='replace').splitlines()
-        new_solves = parse_proxy_solves(new_lines, max_rows=None)
-        _PROXY_SOLVES_CACHE.extend(new_solves)
-    return _PROXY_SOLVES_CACHE
+    with _PROXY_SOLVES_LOCK:
+        if not PROXY_LOG:
+            return []
+        try:
+            with open(PROXY_LOG, 'rb') as f:
+                f.seek(0, 2)
+                size = f.tell()
+                if size < _PROXY_LOG_OFFSET:
+                    # Log rotated or truncated — reset and reparse from scratch
+                    _PROXY_LOG_OFFSET = 0
+                    _PROXY_SOLVES_CACHE = []
+                    _PROXY_LOG_TAIL = b''
+                f.seek(_PROXY_LOG_OFFSET)
+                chunk = f.read(size - _PROXY_LOG_OFFSET)
+                _PROXY_LOG_OFFSET = size
+        except FileNotFoundError:
+            return list(_PROXY_SOLVES_CACHE)
+        except Exception:
+            return list(_PROXY_SOLVES_CACHE)
+        if not chunk:
+            return list(_PROXY_SOLVES_CACHE)
+        data = _PROXY_LOG_TAIL + chunk
+        # Stash anything after the last newline for next pass so a line that
+        # arrives in two reads isn't split mid-regex.
+        if b'\n' in data:
+            last_nl = data.rfind(b'\n')
+            complete = data[:last_nl + 1]
+            _PROXY_LOG_TAIL = data[last_nl + 1:]
+        else:
+            _PROXY_LOG_TAIL = data
+            complete = b''
+        if complete:
+            new_lines = complete.decode('utf-8', errors='replace').splitlines()
+            new_solves = parse_proxy_solves(new_lines, max_rows=None)
+            _PROXY_SOLVES_CACHE.extend(new_solves)
+        return list(_PROXY_SOLVES_CACHE)
 
 
 def incremental_coinbaser_debug_entries():
@@ -2055,6 +2279,61 @@ INDEX_HTML = '''
   .pool-status.STALLED  { color: #1a1d21; background: var(--warn);    }
   .pool-status.DEGRADED { color: #fff;    background: var(--purple);  }
   .pool-status.DOWN     { color: #fff;    background: var(--bad);     }
+  .chain-tabs {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin: 0 0 10px 0;
+  }
+  .chain-tab {
+    appearance: none;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--muted);
+    border-radius: 999px;
+    padding: 2px 8px;
+    font: inherit;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+  }
+  .chain-tab.synced {
+    border-color: rgba(98, 211, 113, 0.65);
+    color: var(--accent2);
+  }
+  .chain-tab.syncing {
+    border-color: rgba(255, 184, 77, 0.7);
+    color: var(--warn);
+  }
+  .chain-tab.error {
+    border-color: rgba(255, 83, 83, 0.75);
+    color: var(--bad);
+  }
+  .chain-tab.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #10151c;
+  }
+  .pool-last-block {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .pool-chain-chips {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+  .pool-chain-chips .share-chain-badge {
+    padding: 1px 6px;
+  }
+  .pool-metric {
+    white-space: nowrap;
+  }
   .hero .summary {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
@@ -2185,7 +2464,7 @@ INDEX_HTML = '''
   }
   .card h2 .legend .type-pill.bech32 { color: var(--accent2); border-color: var(--accent2); }
   .card h2 .legend .type-pill.legacy { color: var(--accent);  border-color: var(--accent);  }
-  .card h2 .legend .type-pill.p2sh   { color: var(--accent);  border-color: var(--accent);  }
+  .card h2 .legend .type-pill.p2sh   { color: var(--warn);    border-color: var(--warn);    }
   .card h2 .legend .type-pill.none   { color: var(--bad);     border-color: var(--bad);     }
   .kv {
     display: grid;
@@ -2206,6 +2485,13 @@ INDEX_HTML = '''
   .kv2 dt { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; align-self: center; }
   .kv2 dd { margin: 0; word-break: break-all; align-self: center; }
   .kv2 .span2 { grid-column: 1 / -1; }
+  .kv2 .kv-wide {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 8px 16px;
+    align-items: center;
+  }
   .kv2 .span2.kv-row {
     display: grid;
     grid-template-columns: max-content 1fr;
@@ -2313,7 +2599,7 @@ INDEX_HTML = '''
   }
   .id-row .type-pill.bech32 { color: var(--accent2); border-color: var(--accent2); }
   .id-row .type-pill.legacy { color: var(--accent);  border-color: var(--accent);  }
-  .id-row .type-pill.p2sh   { color: var(--accent);  border-color: var(--accent);  }
+  .id-row .type-pill.p2sh   { color: var(--warn);    border-color: var(--warn);    }
   .id-row .type-pill.none   { color: var(--bad);     border-color: var(--bad);     }
   details.id-row.misconfig { border-color: rgba(239,83,80,0.4); }
   .id-row .warn-marker {
@@ -2349,8 +2635,8 @@ INDEX_HTML = '''
     color: var(--muted);
   }
   .id-row .identity .addr-mono.bech32 { color: var(--accent2); }
-  .id-row .identity .addr-mono.legacy,
-  .id-row .identity .addr-mono.p2sh   { color: var(--accent); }
+  .id-row .identity .addr-mono.legacy { color: var(--accent); }
+  .id-row .identity .addr-mono.p2sh   { color: var(--warn); }
   .id-row .identity .addr-error {
     color: var(--bad);
     font-style: italic;
@@ -2412,6 +2698,23 @@ INDEX_HTML = '''
     border-left: 1px solid var(--border);
     padding-left: 20px;
   }
+  .id-detail-side.payout-side {
+    border-left: 0;
+    padding-left: 0;
+  }
+  .id-detail-side.payout-side dl {
+    grid-template-columns: 1fr 96px;
+  }
+  .id-detail-side.payout-side dt {
+    grid-column: 2;
+    grid-row: 1;
+    text-align: right;
+    align-self: start;
+  }
+  .id-detail-side.payout-side dd {
+    grid-column: 1;
+    grid-row: 1;
+  }
   .id-detail dt {
     color: var(--muted);
     text-transform: uppercase;
@@ -2432,11 +2735,14 @@ INDEX_HTML = '''
     gap: 6px;
   }
   .id-detail-payouts > div {
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(118px, max-content) minmax(120px, max-content) max-content;
     align-items: baseline;
     gap: 8px;
-    flex-wrap: wrap;
   }
+  .id-detail-payouts .payout-coin { justify-self: start; }
+  .id-detail-payouts .payout-amount { justify-self: end; }
+  .id-detail-payouts .payout-ticker { justify-self: start; color: var(--fg); }
   .id-detail-payouts .muted {
     margin-top: 4px;
   }
@@ -2502,6 +2808,11 @@ INDEX_HTML = '''
     font-size: 12px;
     color: var(--muted);
   }
+  .endpoint-help-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
   .endpoint-help pre {
     background: var(--bg);
     border: 1px solid var(--border);
@@ -2512,6 +2823,11 @@ INDEX_HTML = '''
     overflow-x: auto;
     margin-top: 8px;
     line-height: 1.5;
+  }
+  @media (max-width: 820px) {
+    .endpoint-help-grid {
+      grid-template-columns: 1fr;
+    }
   }
   .endpoint-tip {
     margin-top: 10px;
@@ -2894,6 +3210,7 @@ INDEX_HTML = '''
   .solved-height-cell {
     display: flex;
     flex-direction: column;
+    align-items: center;
     gap: 2px;
   }
   .solved-hash-cell .mono {
@@ -3286,7 +3603,9 @@ INDEX_HTML = '''
 <header>
   <div class="header-brand">
     <h1>{{ HEADER_TITLE }}</h1>
+    {% if HEADER_SUBTITLE %}
     <span class="sub">{{ HEADER_SUBTITLE }}</span>
+    {% endif %}
   </div>
   <div class="header-endpoint">
     <div class="endpoint"><span class="url">{{ STRATUM_URL }}</span><button id="copy-stratum" data-url="{{ STRATUM_URL }}">copy</button></div>
@@ -3314,6 +3633,7 @@ const $ = id => document.getElementById(id);
 let lastState = null;
 let solvedChainFilter = '__all__';
 let solvedRowLimit = 50;
+let chainCardSelected = localStorage.getItem('chain-card-selected') || 'Blakecoin';
 
 // ===== Custom floating tooltips =====
 // Replaces the browser's native title attr (which is too small, light theme,
@@ -3481,6 +3801,10 @@ function fmtAge(ts) {
   if (a < 3600)  return Math.floor(a/60) + 'm ago';
   if (a < 86400) return Math.floor(a/3600) + 'h ago';
   return Math.floor(a/86400) + 'd ago';
+}
+function fmtCount(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
+  return value.toLocaleString();
 }
 function fmtWork(value) {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return '—';
@@ -4019,24 +4343,55 @@ function renderHero(s) {
   return html;
 }
 
-function renderChain(chain) {
-  let html = '<div class="card"><h2>Chain</h2>';
-  if (chain._error) {
-    html += '<div class="bad">' + escHtml(JSON.stringify(chain._error)) + '</div></div>';
+function renderPoolAcceptedChips(labels, s) {
+  const tickers = chainTickersFromState(s);
+  const ordered = chainOrderFromState(s).filter(label => (labels || []).includes(label));
+  if (!ordered.length) return '<span class="muted">—</span>';
+  let html = '<span class="pool-chain-chips">';
+  ordered.forEach(label => {
+    html += '<span class="share-chain-badge accepted" title="' + escHtml(displayChainLabel(label)) + '">' + escHtml(tickers[label] || label) + '</span>';
+  });
+  html += '</span>';
+  return html;
+}
+
+function renderChain(s) {
+  const rows = s.chain_overview || [];
+  const tickers = chainTickersFromState(s);
+  if (!rows.some(row => row.label === chainCardSelected)) {
+    chainCardSelected = rows[0]?.label || 'Blakecoin';
+  }
+  const selected = rows.find(row => row.label === chainCardSelected) || rows[0] || {};
+
+  let html = '<div class="card"><h2>Merged Chains</h2>';
+  if (!rows.length) {
+    html += '<div class="bad">no chain data available</div></div>';
     return html;
   }
+  html += '<div class="chain-tabs">';
+  rows.forEach(row => {
+    const active = row.label === selected.label ? ' active' : '';
+    const status = row.status || 'error';
+    const ticker = row.ticker || tickers[row.label] || row.label;
+    html += '<button type="button" class="chain-tab ' + escHtml(status) + active + '" data-chain-label="' + escHtml(row.label) + '">' + escHtml(ticker) + '</button>';
+  });
+  html += '</div>';
+  if (selected.error) {
+    html += '<div class="bad">' + escHtml(selected.error) + '</div></div>';
+    return html;
+  }
+  const verify = typeof selected.verificationprogress === 'number'
+    ? (selected.verificationprogress * 100).toFixed(2) + '%'
+    : '—';
+  const diff = typeof selected.difficulty === 'number' ? selected.difficulty.toExponential(2) : '—';
   html += '<dl class="kv2">';
-  // Row 1
-  html += '<dt>name</dt><dd>' + (chain.chain || '?') + '</dd>';
-  html += '<dt>blocks</dt><dd><b class="accent">' + (chain.blocks ?? '?') + '</b></dd>';
-  // Row 2
-  html += '<dt>headers</dt><dd>' + (chain.headers ?? '?') + '</dd>';
-  html += '<dt>peers</dt><dd>' + (chain.connections ?? '?') + '</dd>';
-  // Row 3
-  html += '<dt>verify</dt><dd>' + ((chain.verificationprogress ?? 0) * 100).toFixed(2) + '%</dd>';
-  html += '<dt>difficulty</dt><dd>' + (typeof chain.difficulty === 'number' ? chain.difficulty.toExponential(2) : '?') + '</dd>';
-  // Best hash spans both columns at the bottom
-  html += '<div class="span2 kv-row"><dt>best</dt><dd class="mono" style="font-size:11px">' + (chain.bestblockhash || '?') + '</dd></div>';
+  html += '<dt>coin</dt><dd>' + escHtml(displayChainLabel(selected.label)) + '</dd>';
+  html += '<dt>blocks</dt><dd><b class="accent">' + fmtCount(selected.blocks) + '</b></dd>';
+  html += '<dt>headers</dt><dd>' + fmtCount(selected.headers) + '</dd>';
+  html += '<dt>peers</dt><dd>' + (selected.connections ?? '—') + '</dd>';
+  html += '<dt>verify</dt><dd>' + verify + '</dd>';
+  html += '<dt>difficulty</dt><dd>' + diff + '</dd>';
+  html += '<div class="span2 kv-row"><dt>best</dt><dd class="mono" style="font-size:11px">' + escHtml(selected.bestblockhash || '—') + '</dd></div>';
   html += '</dl></div>';
   return html;
 }
@@ -4044,41 +4399,42 @@ function renderChain(chain) {
 function renderPool(s) {
   const pool = s.pool || {};
   const ids = s.identities || [];
-  const blocks = s.recent_solved || [];
-  const parentSolved = blocks.filter(b => b.parent_accepted !== false);
-  const auxOnlySolved = blocks.filter(b => b.parent_accepted === false);
-  const totalReward = parentSolved.length * 50;
   const status = s.status || 'DOWN';
-  const lastBlockTs = pool.last_block_ts;
+  const solvedShares = s.recent_solved_shares || [];
+  const lastSolved = solvedShares.reduce((best, row) => {
+    if (!best || (row.time || 0) > (best.time || 0)) return row;
+    return best;
+  }, null);
+  const lastBlockTs = lastSolved?.time || pool.last_block_ts;
   const lastBlockAge = lastBlockTs ? fmtAge(lastBlockTs) : 'never';
 
   // Aggregate across identities
-  let totalShares = 0, totalBlocks = 0, lastShare = 0;
+  let lastShare = 0;
   ids.forEach(i => {
-    totalShares += i.shares || 0;
-    totalBlocks += i.blocks || 0;
     if ((i.last_share || 0) > lastShare) lastShare = i.last_share;
   });
+  const keyId = i => i?.mining_key || i?.addr || i?.identity || '';
+  const miningKeys = new Set(ids.map(keyId).filter(Boolean));
+  const activeMiningKeys = new Set(ids.filter(i => i.active).map(keyId).filter(Boolean));
   const peerSet = new Set(ids.map(i => i.host));
+  const walletRows = pool.pool_wallet_rows || [];
+  const auxRows = walletRows.filter(row => row.label && row.label !== 'Blakecoin');
+  const auxTotal = auxRows.length || Math.max(0, chainOrderFromState(s).length - 1);
+  const auxReady = auxRows.length ? auxRows.filter(row => !row.error).length : auxTotal;
+  const parentWins = solvedShares.filter(row => (row.chains_accepted || []).includes('Blakecoin')).length;
+  const auxWins = solvedShares.reduce((sum, row) => {
+    return sum + (row.chains_accepted || []).filter(label => label !== 'Blakecoin').length;
+  }, 0);
+  const liveSockets = s.live_socket_count ?? peerSet.size;
 
   let html = '<div class="card"><h2>Pool</h2>';
   html += '<dl class="kv2">';
-  // Row 1: status + last block age (the two "is mining happening" signals)
   html += '<dt>status</dt><dd><span class="pool-status status ' + status + '">' + status + '</span></dd>';
-  html += '<dt>last block</dt><dd><b class="big accent2">' + lastBlockAge + '</b></dd>';
-  // Row 2: templating height + solved-in-window
-  html += '<dt>templating</dt><dd>height <b class="big accent">' + (pool.last_template_height ?? '—') + '</b></dd>';
-  html += '<dt>solved</dt><dd><b class="ok">' + parentSolved.length + '</b> parent blocks';
-  if (auxOnlySolved.length) {
-    html += ' <span class="accent2">+' + auxOnlySolved.length + ' aux-only</span>';
-  }
-  html += '</dd>';
-  // Row 3: identities + shares
-  html += '<dt>identities</dt><dd>' + ids.length + ' (' + (s.active_count || 0) + ' active)</dd>';
-  html += '<dt>shares</dt><dd>' + totalShares + '</dd>';
-  // Row 4: peers + reward
-  html += '<dt>peers</dt><dd>' + peerSet.size + '</dd>';
-  html += '<dt>reward</dt><dd>≈ ' + totalReward + ' BLC mined</dd>';
+  html += '<div class="kv-wide"><dt>last block</dt><dd><span class="pool-last-block"><b class="big accent2">' + lastBlockAge + '</b>' + renderPoolAcceptedChips(lastSolved?.chains_accepted || [], s) + '</span></dd></div>';
+  html += '<dt>miners</dt><dd><span class="pool-metric">' + liveSockets + ' live</span></dd>';
+  html += '<dt>mining keys</dt><dd><span class="pool-metric">' + activeMiningKeys.size + ' active / ' + miningKeys.size + ' total</span></dd>';
+  html += '<dt>recent wins</dt><dd><span class="pool-metric"><b class="ok">' + parentWins.toLocaleString() + '</b> BLC / <b class="accent2">' + auxWins.toLocaleString() + '</b> aux</span></dd>';
+  html += '<dt>aux rpc</dt><dd><span class="pool-metric">' + auxReady + ' / ' + auxTotal + ' ready</span></dd>';
   html += '</dl></div>';
   return html;
 }
@@ -4133,23 +4489,26 @@ function renderEndpointHelp(s) {
   let html = '<details class="card full card-collapse" data-key="card-endpoint-help">';
   html += '<summary><h2>How to Mine</h2></summary>';
   html += '<div class="card-body"><div class="endpoint-help">';
+  html += '<div class="endpoint-help-grid">';
   html += '<pre>';
-  html += '# cgminer / blakeminer (any Blake-256 capable miner)\\n';
-  html += 'cgminer -o ' + url + ' -u a5d3e00343efe51e81d39884a74124ca060fefdd -p x\\n';
-  html += '\\n';
-  html += '# minimal Python CPU miner shipped with this bundle\\n';
-  html += 'STRATUM_HOST=' + stratum.host + ' STRATUM_PORT=' + stratum.port + ' \\\\\\n';
-  html += '  STRATUM_USER=a5d3e00343efe51e81d39884a74124ca060fefdd python3 cpu_miner.py';
+  html += 'BAIKAL GIANT-B ASIC\\n\\n';
+  html += 'POOL URL    ' + url + '\\n';
+  html += 'ALGORITHM   Blake256r8\\n';
+  html += 'USER        miningkey.worker\\n';
+  html += 'PASS        x\\n';
+  html += 'EXTRANONCE  DISABLE  (uncheck the Extranonce box)';
   html += '</pre>';
-  html += '<div class="endpoint-tip">';
-  html += '<b>Username format:</b> use the bare <span class="mono">miningkey</span> in your miner. A direct address still works as compatibility input, and <span class="mono">.workername</span> remains optional if you need it.';
+  html += '<pre>';
+  html += 'GPU MINING\\n\\n';
+  html += 'CGMINER\\n';
+  html += 'cgminer --blake256 -o ' + url + ' -u miningkey.worker -p x\\n\\n';
+  html += 'SGMINER\\n';
+  html += 'sgminer --no-submit-stale --kernel blakecoin --gpu-platform 0 -I 30 --no-extranonce \\\\\\n';
+  html += '  -o ' + url + ' -u miningkey.worker -p x';
+  html += '</pre>';
   html += '</div>';
   html += '<div class="endpoint-tip">';
-  html += '<b>How payouts work:</b> each block is split across recent share contributors, with a 1% pool keep. Mining keys pay to bech32 addresses automatically.';
-  html += '</div>';
-  html += '<div class="endpoint-tip muted">';
-  html += '<b>auth:</b> allowall &mdash; any password works; the username is what matters. ';
-  html += '<b>misconfig:</b> if your username is neither a valid direct address nor a recognised mining key, the splitter skips you (your shares don&rsquo;t earn BLC, but the chain still mines).';
+  html += '<b>User:</b> use your generated mining key. Add <span class="mono">.worker</span> if you want a worker label.';
   html += '</div></div></div>';
   html += '</details>';
   return html;
@@ -4286,14 +4645,14 @@ function renderMkgenArea(result, segwitHrp, stratumHost, stratumPort, coinHrps) 
       }
       html += '</span>';
       html += '<button class="copy-btn" data-copy="' + escHtml(details.address || '') + '">copy</button></div>';
-      html += '<div class="val address-derived">' + escHtml(details.address || '') + ' <span style="color:var(--muted)">(bech32)</span></div>';
+      html += '<div class="val address-derived">' + escHtml(details.address || '') + '</div>';
       html += '</div>';
     });
   } else if (result.derivedAddress) {
     html += '<div class="mkgen-row">';
     html += '<div class="lbl"><span>Blakecoin</span>';
     html += '<button class="copy-btn" data-copy="' + escHtml(result.derivedAddress) + '">copy</button></div>';
-    html += '<div class="val address-derived">' + escHtml(result.derivedAddress) + ' <span style="color:var(--muted)">(bech32)</span></div>';
+    html += '<div class="val address-derived">' + escHtml(result.derivedAddress) + '</div>';
     html += '</div>';
   } else if (derivationReady) {
     html += '<div class="mkgen-row">';
@@ -4542,13 +4901,13 @@ function renderMiners(s) {
     html += '<dt>weighted work</dt><dd><b class="accent">' + fmtWork(m.weighted_work || 0) + '</b> difficulty-weighted share units</dd>';
     html += '<dt>block-solves</dt><dd><b class="ok">' + m.blocks + '</b> winning shares</dd>';
     html += '</dl>';
-    html += '<div class="id-detail-side"><dl>';
+    html += '<div class="id-detail-side payout-side"><dl>';
     html += '<dt>all payouts</dt><dd class="id-detail-payouts">';
     html += chainOrder.map(label => {
       const sats = allPaid[label] || 0;
       const ticker = chainTickers[label] || label;
       const amountClass = sats > 0 ? 'accent2' : 'muted';
-      return '<div><span class="hpill">' + escHtml(displayChainLabel(label)) + '</span> <b class="' + amountClass + '">' + (sats / 1e8).toFixed(8) + '</b> ' + escHtml(ticker) + '</div>';
+      return '<div><span class="hpill payout-coin">' + escHtml(displayChainLabel(label)) + '</span><b class="payout-amount ' + amountClass + '">' + (sats / 1e8).toFixed(8) + '</b><span class="payout-ticker">' + escHtml(ticker) + '</span></div>';
     }).join('');
     if (!m.addr) {
       html += '<div class="muted">No payout address was parsed from the username, so every chain stays at zero until the miner reconnects with a valid address or mining key.</div>';
@@ -4635,7 +4994,7 @@ function renderAcceptedBreakdown(block, s) {
   details.forEach(item => {
     const label = item.label || item.alias || 'unknown';
     const ticker = tickers[label] || label;
-    const height = (typeof item.height === 'number') ? ('h' + item.height) : 'h?';
+    const height = (typeof item.height === 'number') ? String(item.height) : '—';
     const hash = item.hash || '?';
     html += '<div class="line">';
     html += '<span class="hpill" title="' + escHtml(displayChainLabel(label)) + '">' + escHtml(ticker) + '</span>';
@@ -4674,7 +5033,7 @@ function renderSolved(s) {
   if (latest) {
     html += ' <span class="summary-latest">latest:';
     html += ' <span>' + escHtml(latestDisplay) + '</span>';
-    html += ' <span class="hpill">' + (typeof latest.height === 'number' ? ('h' + latest.height) : 'h?') + '</span>';
+    html += ' <span class="hpill">' + (typeof latest.height === 'number' ? latest.height : '—') + '</span>';
     html += ' <span class="mono">' + escHtml(latest.hash) + '</span>';
     html += ' <span class="muted">' + fmtAge(latest.time) + '</span>';
     html += '</span>';
@@ -4711,7 +5070,7 @@ function renderSolved(s) {
         const rowDisplay = displayChainLabel(row.coin);
         html += '<tr>';
         html += '<td><div class="solved-chain-cell"><span>' + escHtml(rowDisplay) + '</span></div></td>';
-        html += '<td><div class="solved-height-cell"><span class="hpill">' + (typeof row.height === 'number' ? ('h' + row.height) : 'h?') + '</span></div></td>';
+        html += '<td><div class="solved-height-cell"><span class="hpill">' + (typeof row.height === 'number' ? row.height : '—') + '</span></div></td>';
         html += '<td><div class="solved-hash-cell"><span class="mono">' + escHtml(row.hash) + '</span></div></td>';
         html += '<td>' + fmtDifficulty(row.difficulty) + '</td>';
         html += '<td><b class="accent2">' + fmtCoinAmount(row.reward) + '</b> ' + escHtml(row.ticker || row.coin) + '</td>';
@@ -4811,6 +5170,57 @@ function renderShares(s) {
   return html;
 }
 
+function renderSolvedShares(s) {
+  const shares = s.recent_solved_shares || [];
+  let html = '<details class="card full card-collapse" data-key="card-solved-shares">';
+  html += '<summary><h2>Recent Solved Shares <span class="count">' + shares.length + '</span></h2></summary>';
+  html += '<div class="card-body">';
+  if (shares.length === 0) {
+    html += '<div class="empty">no solved shares yet — block-winning shares will appear here</div>';
+  } else {
+    html += '<table><tr><th>age</th><th>host</th><th>worker</th><th>type</th><th>address</th><th>chains solved</th><th>work</th></tr>';
+    shares.slice().reverse().forEach(sh => {
+      const addrCls = sh.addr_type === 'bech32' ? 'ok' :
+                      (sh.addr_type === 'legacy' || sh.addr_type === 'p2sh') ? 'accent' : 'bad';
+      let workerCell;
+      if (sh.worker) {
+        workerCell = escHtml(sh.worker);
+      } else if (!sh.addr) {
+        workerCell = '<span class="muted">' + escHtml(sh.user) + '</span>';
+      } else {
+        workerCell = '<span class="muted">—</span>';
+      }
+      let typeCell;
+      if (sh.addr) {
+        const tagText = ADDR_TYPE_LABEL[sh.addr_type] || sh.addr_type;
+        const pillTitle = ADDR_TYPE_TOOLTIP[sh.addr_type] || '';
+        typeCell = '<span class="type-pill ' + sh.addr_type + '" title="' + escHtml(pillTitle) + '">' + tagText + '</span>';
+      } else {
+        typeCell = '<span class="warn-marker" title="' + escHtml(ADDR_TYPE_TOOLTIP.none) + '">⚠</span>';
+      }
+      let addrCell;
+      if (sh.addr) {
+        addrCell = '<span class="' + addrCls + '">' + escHtml(sh.addr) + '</span>';
+      } else {
+        addrCell = '<span class="bad" title="' + escHtml(ADDR_TYPE_TOOLTIP.none) + '">⚠ misconfig</span>';
+      }
+      html += '<tr>';
+      html += '<td>' + fmtAge(sh.time) + '</td>';
+      html += '<td class="mono">' + escHtml(sh.host) + '</td>';
+      html += '<td>' + workerCell + '</td>';
+      html += '<td>' + typeCell + '</td>';
+      html += '<td class="mono" style="font-size:11px">' + addrCell + '</td>';
+      html += '<td>' + renderShareChains(sh, s) + '</td>';
+      html += '<td>' + fmtWork(sh.weight || 0) + '</td>';
+      html += '</tr>';
+    });
+    html += '</table>';
+  }
+  html += '</div>';
+  html += '</details>';
+  return html;
+}
+
 function renderLog(s) {
   const lines = (s.pool_log || []).join('\\n');
   let html = '<div class="card full"><h2>Pool Log</h2>';
@@ -4821,13 +5231,14 @@ function renderLog(s) {
 }
 
 function render(s) {
-  return renderChain(s.chain || {})
+  return renderChain(s)
        + renderPool(s)
        + renderEndpointHelp(s)
        + renderMiningKeyGenerator(s)
        + renderPayouts(s)
        + renderMiners(s)
        + renderSolved(s)
+       + renderSolvedShares(s)
        + renderShares(s)
        + renderLog(s);
 }
@@ -4916,6 +5327,15 @@ function attachHandlers() {
       if (lastState) renderState(lastState);
     };
   }
+
+  document.querySelectorAll('.chain-tab[data-chain-label]').forEach(el => {
+    el.onclick = (ev) => {
+      ev.preventDefault();
+      chainCardSelected = el.dataset.chainLabel || 'Blakecoin';
+      localStorage.setItem('chain-card-selected', chainCardSelected);
+      if (lastState) renderState(lastState);
+    };
+  });
 
   // Per-identity copy buttons
   document.querySelectorAll('.copy-id').forEach(el => {
@@ -5195,17 +5615,17 @@ def api_state():
         peers = rpc('getconnectioncount')
         if isinstance(peers, int):
             chain['connections'] = peers
+    chain_overview = build_chain_overview(chain)
 
     pool_lines = read_lines(POOL_LOG)
-    share_lines = tail(SHARE_LOG, n=100)
+    all_share_lines = read_lines(SHARE_LOG)
+    share_lines = all_share_lines[-100:]
 
-    # Build a bounded view. We merge proxy-solve detail for the most recent
-    # blocks (displayed in Recent Blocks) from a small tail of the proxy
-    # log; historical blocks still appear but without per-aux-chain status.
-    # Aux-chain PAYOUT totals come from querying each aux daemon directly
-    # (cheap, bounded) rather than walking the proxy log.
-    proxy_lines = tail(PROXY_LOG, n=500) if PROXY_LOG else []
-    proxy_solves = parse_proxy_solves(proxy_lines, max_rows=None)
+    # Proxy solve detail is needed to expand one merged-mining solve into
+    # parent + aux-chain rows. Keep that state incrementally instead of using
+    # a tiny log tail; under active miners the accepted aux detail scrolls out
+    # quickly, which leaves the Recent Solved Blocks table showing only BLC.
+    proxy_solves = incremental_proxy_solves()
     all_solved = parse_pool_state(pool_lines, max_rows=None)
     solved_all = [_finalize_solved_block(b) for b in all_solved]
     # Only run the expensive attach_proxy_solves on the tail we render
@@ -5220,6 +5640,7 @@ def api_state():
     solved = solved_all[-15:]
     recent_block_rows = build_recent_block_rows(solved)
     shares = attach_share_chain_outcomes(parse_share_log(share_lines), proxy_solves)
+    solved_shares = build_recent_solved_shares(all_share_lines, proxy_solves)
 
     # Last GBT height seen in pool log = last "New block" line
     last_template_height = None
@@ -5236,7 +5657,7 @@ def api_state():
     # cumulative — otherwise a winning share scrolling out of the tail would
     # cause the per-miner block count to visibly drop, which surprises users.
     connections = list_stratum_connections()
-    id_stats = parse_identity_stats(read_lines(SHARE_LOG))
+    id_stats = parse_identity_stats(all_share_lines)
     # For each identity, also credit aux-chain wins: whenever a parent-chain
     # block solved by this identity also accepted aux chains, each aux win
     # counts as an additional merged block. This makes the number match what
@@ -5297,6 +5718,7 @@ def api_state():
         'status': status,
         'now':    time.time(),
         'chain':  chain,
+        'chain_overview': chain_overview,
         'pool': {
             'state':                'running' if pool_lines and 'merkleMaker' in '\n'.join(pool_lines[-10:]) else 'idle',
             'last_template_height': last_template_height,
@@ -5328,8 +5750,9 @@ def api_state():
         'recent_solved':   solved,
         'recent_blocks':   solved,
         'recent_block_rows': recent_block_rows,
+        'recent_solved_shares': solved_shares,
         'recent_shares':   shares,
-        'pool_log':        pool_lines[-40:],
+        'pool_log':        display_pool_log(pool_lines)[-40:],
     })
     with _API_STATE_LOCK:
         _API_STATE_CACHE['ts'] = time.time()

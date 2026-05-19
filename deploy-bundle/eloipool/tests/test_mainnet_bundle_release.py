@@ -34,6 +34,32 @@ def render_template(text: str, replacements: dict[str, str]) -> str:
 
 
 class TestMainnetBundleRelease(unittest.TestCase):
+    CORE_BUNDLE_SYNC_FILES = (
+        "eloipool.py",
+        "merklemaker.py",
+        "stratumserver.py",
+        "networkserver.py",
+        "merged-mine-proxy.py3",
+        "config.py.example",
+        "sharelogging/logfile.py",
+        "sharelogging/sql.py",
+    )
+
+    def test_deploy_bundle_eloipool_core_files_match_source_tree(self):
+        if not (TEST_ROOT / "deploy-bundle").is_dir():
+            self.skipTest("bundle copy does not include source tree")
+
+        for relpath in self.CORE_BUNDLE_SYNC_FILES:
+            source_file = TEST_ROOT / relpath
+            bundle_file = BUNDLE / "eloipool" / relpath
+            self.assertTrue(source_file.is_file(), msg=f"missing source file {relpath}")
+            self.assertTrue(bundle_file.is_file(), msg=f"missing bundled file {relpath}")
+            self.assertEqual(
+                source_file.read_bytes(),
+                bundle_file.read_bytes(),
+                msg=f"deploy-bundle/eloipool/{relpath} is stale; run deploy-bundle/scripts/build-bundle.sh",
+            )
+
     def test_deploy_scripts_parse(self):
         for script in (
             BUNDLE / "deploy.sh",
@@ -141,8 +167,31 @@ class TestMainnetBundleRelease(unittest.TestCase):
         self.assertIn('DAEMON_INSTALL_MODE="${DAEMON_INSTALL_MODE:-${MODE_FLAG:-local}}"', script)
         self.assertIn("https://github.com/BlueDragon747/Blakecoin.git", script)
         self.assertIn("https://github.com/BlakeBitcoin/BlakeBitcoin.git", script)
-        self.assertIn('bash deploy-full-stack.sh -pull', script)
-        self.assertIn('bash deploy-full-stack.sh -local', script)
+        self.assertIn('bash deploy-full-stack.sh --pull', script)
+        self.assertIn('bash deploy-full-stack.sh [--bootstrap|--no-bootstrap]', script)
         self.assertIn('expected local or pull', script)
-        self.assertIn('detected using currently running daemons', script)
+        self.assertIn('detected (%s)', script)
         self.assertIn('docker pull "${image}"', script)
+        self.assertIn('MAINNET_SYNC_ROTATION="${MAINNET_SYNC_ROTATION:-true}"', script)
+        self.assertIn('START_LOCAL_PEERS="${START_LOCAL_PEERS:-auto}"', script)
+        self.assertIn('LOCAL_PEER_MIN_RAM_MB="${LOCAL_PEER_MIN_RAM_MB:-24576}"', script)
+        self.assertIn('FINAL_DAEMON_SETTLE_S="${FINAL_DAEMON_SETTLE_S:-8}"', script)
+        self.assertIn("Sequential mainnet daemon bootstrap/sync rotation", script)
+        self.assertIn("wait_bootstrap_import_done", script)
+        self.assertIn("mainnet daemon sync rotation complete", script)
+        self.assertIn("Skipping local peer daemons", script)
+        self.assertIn("START_LOCAL_PEERS must be auto, true, or false", script)
+        self.assertIn("s/^bind=/#sync-disabled bind=/", script)
+        self.assertIn("s/^#sync-disabled bind=/bind=/", script)
+        self.assertIn('rpc_timeout = float(os.environ.get("RPC_TIMEOUT_S", "20"))', script)
+        self.assertIn("RPC_TIMEOUT_S=60", script)
+        self.assertIn("getwalletinfo", script)
+        self.assertIn("Letting ${label} settle", script)
+        self.assertIn("resuming incomplete download", script)
+        self.assertIn("--tries=1", script)
+        self.assertIn("failed with partial", script)
+        self.assertIn("Background bootstrap downloads failed", script)
+        self.assertIn("downloaded file is empty", script)
+        self.assertIn("Final daemon memory health check", script)
+        self.assertIn("FINAL_MIN_AVAILABLE_RAM_MB", script)
+        self.assertIn("high swap use", script)
