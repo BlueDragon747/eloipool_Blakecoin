@@ -1868,19 +1868,26 @@ printf 'Lithium height: %s\n' "$(rpc "${RPC_PORT_LIT}" getblockcount)"
 printf 'Photon height: %s\n' "$(rpc "${RPC_PORT_PHO}" getblockcount)"
 printf 'UniversalMolecule height: %s\n' "$(rpc "${RPC_PORT_UMO}" getblockcount)"
 printf 'Pool services:\n'
+print_service_summary() {
+    local unit="$1"
+    local state main_pid memory_current
+    state="$(systemctl is-active "$unit" 2>/dev/null || true)"
+    main_pid="$(systemctl show "$unit" --property=MainPID --value 2>/dev/null || true)"
+    memory_current="$(systemctl show "$unit" --property=MemoryCurrent --value 2>/dev/null || true)"
+    [ -n "$state" ] || state="unknown"
+    [ -n "$main_pid" ] || main_pid="0"
+    if [ -n "$memory_current" ] && [ "$memory_current" != "[not set]" ] && [ "$memory_current" -gt 0 ] 2>/dev/null; then
+        memory_current="$((memory_current / 1024 / 1024))MB"
+    else
+        memory_current="n/a"
+    fi
+    printf '  %-52s state=%-8s pid=%-8s memory=%s\n' "$unit" "$state" "$main_pid" "$memory_current"
+}
+print_service_summary "${UNIT_POOL}"
+print_service_summary "${UNIT_PROXY}"
+print_service_summary "${UNIT_DASHBOARD}"
 if [ "${ENABLE_CPU_MINER}" = "true" ]; then
-    systemctl --no-pager --plain --full status \
-      "${UNIT_POOL}" \
-      "${UNIT_PROXY}" \
-      "${UNIT_DASHBOARD}" \
-      "${UNIT_MINER}" \
-      | sed -n '1,40p'
-else
-    systemctl --no-pager --plain --full status \
-      "${UNIT_POOL}" \
-      "${UNIT_PROXY}" \
-      "${UNIT_DASHBOARD}" \
-      | sed -n '1,40p'
+    print_service_summary "${UNIT_MINER}"
 fi
 printf '\nRecent miner log:\n'
 if [ "${ENABLE_CPU_MINER}" = "true" ]; then
