@@ -1516,7 +1516,8 @@ try_address_type() {
         fi
 
         # JSON-RPC method errors are usually deterministic here, for example
-        # a daemon rejecting bech32 before activation. Retry only warmup.
+        # BBTC rejecting bech32 before activation, commonly with code=-4.
+        # Retry only warmup.
         if [ "${rc}" -eq 2 ] && ! printf '%s\n' "${out}" | grep -q 'code=-28'; then
             printf '%s\n' "${out}" >&2
             return 2

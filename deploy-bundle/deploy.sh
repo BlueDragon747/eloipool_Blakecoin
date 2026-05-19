@@ -193,7 +193,8 @@ generate_remote_aux_address() {
 
     if printf '%s\n' "$out" | grep -Eiq 'bech32|address type|segwit'; then
         echo "WARNING: ${label} rejected bech32 pool-aux address; falling back to legacy" >&2
-        run_ssh "$(remote_cli_command "$cli" "$conf" getnewaddress pool-aux legacy)"
+        out="$(run_ssh "$(remote_cli_command "$cli" "$conf" getnewaddress pool-aux legacy)" 2>&1)"
+        printf '%s\n' "$out"
         return
     fi
 
