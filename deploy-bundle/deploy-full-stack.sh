@@ -434,7 +434,9 @@ cat > "$STAGE_ROOT/bin/rpc_call.py" <<'PY'
 import base64
 import json
 import os
+import socket
 import sys
+import urllib.error
 import urllib.request
 
 if len(sys.argv) < 3:
@@ -448,6 +450,10 @@ rpc_user = os.environ.get("RPC_USER", "blakestream")
 rpc_pass = os.environ.get("RPC_PASSWORD", "blakestream-testnet")
 rpc_timeout = float(os.environ.get("RPC_TIMEOUT_S", "20"))
 
+def die(message, code=1):
+    print(message, file=sys.stderr)
+    sys.exit(code)
+
 def parse_value(raw):
     if raw == "true":
         return True
@@ -456,7 +462,10 @@ def parse_value(raw):
     if raw == "null":
         return None
     if raw.startswith("json:"):
-        return json.loads(raw[5:])
+        try:
+            return json.loads(raw[5:])
+        except json.JSONDecodeError as exc:
+            die(f"RPC_PARAM_ERROR port={rpc_port} method={method} param={raw[:80]!r} error={exc}", 1)
     try:
         return int(raw)
     except ValueError:
@@ -466,6 +475,23 @@ def parse_value(raw):
     except ValueError:
         pass
     return raw
+
+def format_rpc_error(payload):
+    err = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(err, dict):
+        code = err.get("code", "unknown")
+        message = str(err.get("message", "")).replace("\n", " ").strip()
+        return f"RPC_ERROR port={rpc_port} method={method} code={code} message={message}"
+    if err:
+        return f"RPC_ERROR port={rpc_port} method={method} error={err}"
+    return f"RPC_ERROR port={rpc_port} method={method} malformed_error_response"
+
+def load_response(raw):
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        text = raw.decode("utf-8", "replace").replace("\n", " ")[:500]
+        die(f"RPC_DECODE_ERROR port={rpc_port} method={method} error={exc} body={text}", 3)
 
 params = [parse_value(v) for v in raw_params]
 body = json.dumps({"jsonrpc": "1.0", "id": "rpc", "method": method, "params": params}).encode()
@@ -479,12 +505,20 @@ req = urllib.request.Request(
     },
 )
 
-with urllib.request.urlopen(req, timeout=rpc_timeout) as resp:
-    payload = json.loads(resp.read())
+try:
+    with urllib.request.urlopen(req, timeout=rpc_timeout) as resp:
+        payload = load_response(resp.read())
+except urllib.error.HTTPError as exc:
+    raw = exc.read()
+    if raw:
+        payload = load_response(raw)
+        die(format_rpc_error(payload), 2)
+    die(f"RPC_HTTP_ERROR port={rpc_port} method={method} status={exc.code} reason={exc.reason}", 3)
+except (urllib.error.URLError, TimeoutError, socket.timeout, ConnectionError, OSError) as exc:
+    die(f"RPC_TRANSPORT_ERROR port={rpc_port} method={method} error={exc}", 3)
 
 if payload.get("error"):
-    print(json.dumps(payload["error"]), file=sys.stderr)
-    sys.exit(2)
+    die(format_rpc_error(payload), 2)
 
 result = payload.get("result")
 if isinstance(result, str):
@@ -1471,9 +1505,26 @@ generate_pool_aux_address() {
 set -euo pipefail
 try_address_type() {
     local addr_type="$1"
+    local out=""
+    local rc=0
     for attempt in 1 2 3 4 5 6; do
-        if RPC_TIMEOUT_S=60 "${INSTALL_ROOT}/bin/rpc_call.py" "${PORT}" getnewaddress pool-aux "${addr_type}"; then
+        if out="$(RPC_TIMEOUT_S=60 "${INSTALL_ROOT}/bin/rpc_call.py" "${PORT}" getnewaddress pool-aux "${addr_type}" 2>&1)"; then
+            printf '%s\n' "${out}"
             return 0
+        else
+            rc=$?
+        fi
+
+        # JSON-RPC method errors are usually deterministic here, for example
+        # a daemon rejecting bech32 before activation. Retry only warmup.
+        if [ "${rc}" -eq 2 ] && ! printf '%s\n' "${out}" | grep -q 'code=-28'; then
+            printf '%s\n' "${out}" >&2
+            return 2
+        fi
+
+        if [ "${attempt}" -eq 6 ]; then
+            printf '%s\n' "${out}" >&2
+            return "${rc}"
         fi
         sleep "$((attempt * 5))"
     done
