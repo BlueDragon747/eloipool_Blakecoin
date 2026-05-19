@@ -243,11 +243,22 @@ else:
 	if not hasattr(config, 'DynamicTargetQuick'):
 		config.DynamicTargetQuick = True
 
+def _redactedGotworkURI():
+	uri = getattr(config, 'GotWorkURI', 'configured gotwork endpoint')
+	if '://' in uri and '@' in uri:
+		scheme, rest = uri.split('://', 1)
+		return '%s://<redacted>@%s' % (scheme, rest.rsplit('@', 1)[-1])
+	return uri
+
 def submitGotwork(info):
 	try:
 		gotwork.gotwork(info)
-	except:
-		checkShare.logger.warning('Failed to submit gotwork\n' + traceback.format_exc())
+	except Exception as e:
+		checkShare.logger.warning(
+			'Gotwork submit failed: merged-mining proxy unavailable at %s (%s: %s)'
+			% (_redactedGotworkURI(), e.__class__.__name__, e)
+		)
+		checkShare.logger.debug('Gotwork submit traceback\n' + traceback.format_exc())
 
 def getGotworkCoinbaseAux(username):
 	if not gotwork or not username:
@@ -1081,6 +1092,8 @@ if __name__ == "__main__":
 	server.ShareTarget = config.ShareTarget
 	server.StaleWorkTimeout = config.StaleWorkTimeout
 	server.checkAuthentication = checkAuthentication
+	if hasattr(config, 'SocketWriteBufferMax'):
+		server.MaxWriteBuffer = config.SocketWriteBufferMax
 	
 	if hasattr(config, 'TrustedForwarders'):
 		server.TrustedForwarders = config.TrustedForwarders
@@ -1096,6 +1109,8 @@ if __name__ == "__main__":
 	stratumsrv.IsJobValid = IsJobValid
 	stratumsrv.checkAuthentication = checkAuthentication
 	stratumsrv.WorkUpdateInterval = config.WorkUpdateInterval
+	if hasattr(config, 'SocketWriteBufferMax'):
+		stratumsrv.MaxWriteBuffer = config.SocketWriteBufferMax
 	if not hasattr(config, 'StratumAddresses'):
 		config.StratumAddresses = ()
 	for a in config.StratumAddresses:

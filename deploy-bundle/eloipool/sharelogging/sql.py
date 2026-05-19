@@ -250,37 +250,27 @@ class sql:
 				_logger.error('Chain %s: Batch insert failed (attempt %d/%d): %s', 
 							  chain_id, attempts, sql.MAX_RECONNECT_ATTEMPTS, e)
 				
-				if attempts < sql.MAX_RECONNECT_ATTEMPTS:
-					_logger.info('Waiting %.1fs before reconnect...', sql.RECONNECT_DELAY)
-					sleep(sql.RECONNECT_DELAY)
-					try:
-						db = sql._reconnect(chain_id)
-						db_connections[chain_id] = db
-					except Exception as reconnect_error:
-						_logger.error('Reconnection failed: %s', reconnect_error)
-				else:
-					# Max attempts reached - fallback to individual
-					_logger.critical('Chain %s: Max reconnection attempts reached, ' +
-									 'falling back to individual inserts', chain_id)
-					sql._fallback_individual_inserts(chain_id, chain_batch)
-					return
-				_logger.error('Chain %s: Batch insert failed (attempt %d/%d): %s', 
-							  chain_id, attempts, sql.MAX_RECONNECT_ATTEMPTS, e)
+				try:
+					if db is not None:
+						db.close()
+				except:
+					pass
+				db = None
+				db_connections.pop(chain_id, None)
 				
-				if attempts < sql.MAX_RECONNECT_ATTEMPTS:
-					_logger.info('Waiting %.1fs before reconnect...', sql.RECONNECT_DELAY)
-					sleep(sql.RECONNECT_DELAY)
-					try:
-						db = sql._reconnect(chain_id)
-						db_connections[chain_id] = db
-					except Exception as reconnect_error:
-						_logger.error('Reconnection failed: %s', reconnect_error)
-				else:
-					# Max attempts reached - fallback to individual
+				if attempts >= sql.MAX_RECONNECT_ATTEMPTS:
 					_logger.critical('Chain %s: Max reconnection attempts reached, ' +
 									 'falling back to individual inserts', chain_id)
 					sql._fallback_individual_inserts(chain_id, chain_batch)
 					return
+
+				_logger.info('Waiting %.1fs before reconnect...', sql.RECONNECT_DELAY)
+				sleep(sql.RECONNECT_DELAY)
+				try:
+					db = sql._reconnect(chain_id)
+					db_connections[chain_id] = db
+				except Exception as reconnect_error:
+					_logger.error('Reconnection failed: %s', reconnect_error)
 	
 	@staticmethod
 	def _fallback_individual_inserts(chain_id, chain_batch):
@@ -411,5 +401,3 @@ class sql:
 				_writer_thread.join(timeout=10.0)
 				if _writer_thread.is_alive():
 					_logger.warning('Shared writer thread did not stop gracefully')
-
-

@@ -22,76 +22,233 @@ bash deploy-bundle/scripts/build-bundle.sh
 That keeps the shipped `deploy-bundle/eloipool/` tree aligned with the root
 runtime/tests.
 
-## Deploying
+## Deployment Options
+
+There are two deploy scripts. Most users should use the full-stack script.
+
+| Script | Use It When | What It Deploys |
+| --- | --- | --- |
+| `deploy-full-stack.sh` | You want a fresh six-chain mainnet pool. | Coin daemons, configs, bootstraps, one-at-a-time sync, merged-mine proxy, Eloipool, dashboard, systemd services. |
+| `deploy.sh` | You already have daemon RPCs running and only want to layer the pool on top. | Eloipool, merged-mine proxy, dashboard, and optional older daemon provisioning modes. |
+
+## Full-Stack Deploy
+
+`deploy-full-stack.sh` is the recommended installer. It defaults to mainnet,
+preserves existing coin datadirs, and must run as root on local installs.
+
+### Copy-Paste Local Installs
+
+Fresh local VPS install, building all six daemons from source:
 
 ```bash
 cd /path/to/Blakestream-Eliopool-15.21
-bash deploy-bundle/deploy.sh <host> [user] [password]
+sudo bash deploy-bundle/deploy-full-stack.sh
 ```
 
-## Full Six-Chain Deploy
-
-For the full six-chain deploy entrypoint, use:
+Fresh local VPS install, pulling published daemon binaries:
 
 ```bash
 cd /path/to/Blakestream-Eliopool-15.21
-bash deploy-bundle/deploy-full-stack.sh -local
+sudo bash deploy-bundle/deploy-full-stack.sh --pull
 ```
 
-or:
+Fresh local VPS install without bootstrap downloads:
 
 ```bash
 cd /path/to/Blakestream-Eliopool-15.21
-bash deploy-bundle/deploy-full-stack.sh -pull
+sudo bash deploy-bundle/deploy-full-stack.sh --no-bootstrap
 ```
 
-`deploy-full-stack.sh` supports only 2 daemon modes:
+Local VPS install with a public hostname and custom ports:
 
-- `-local` builds the six coin daemons from source on the VPS
-- `-pull` pulls the published `sidgrip/<coin>:15.21` daemon images on the VPS
+```bash
+cd /path/to/Blakestream-Eliopool-15.21
+PUBLIC_HOST=pool.example.com \
+STRATUM_PORT=3334 \
+DASHBOARD_PORT=18081 \
+sudo bash deploy-bundle/deploy-full-stack.sh --pull
+```
 
-By default, the script deploys `mainnet`.
+Local testnet install:
 
-Set one of these only when you want a different network:
+```bash
+cd /path/to/Blakestream-Eliopool-15.21
+NETWORK_MODE=testnet \
+sudo bash deploy-bundle/deploy-full-stack.sh --pull --no-bootstrap
+```
 
-- `NETWORK_MODE=testnet`
-- `NETWORK_MODE=regtest`
+### Copy-Paste Remote Installs
 
-Before deploying, it scans the target for existing BlakeStream systemd units,
-daemon processes, and Docker containers and prints a summary of what it found.
-That detection is informational only. The selected mode still controls the
-deploy.
+Remote install from a workstation, building daemons on the VPS:
 
-Important release settings:
+```bash
+cd /path/to/Blakestream-Eliopool-15.21
+bash deploy-bundle/deploy-full-stack.sh root@your-vps
+```
 
-- `deploy.sh` supports 3 daemon install modes:
-  - `DAEMON_INSTALL_MODE=existing` keeps using daemons already on the host
-  - `DAEMON_INSTALL_MODE=container` pulls `sidgrip/<coin>:15.21` images and runs them locally with Docker
-  - `DAEMON_INSTALL_MODE=source` clones the upstream coin repos and compiles them on the host
-- `deploy.sh` still discovers the 6 RPC conf files + CLI tools automatically after provisioning
-- `DAEMON_INSTALL_MODE=container` is the preferred Docker deployment path
-- source mode is wired to the upstream repo/branch map from the six coin build scripts:
-  - Blakecoin `https://github.com/BlueDragon747/Blakecoin.git` `master`
-  - BlakeBitcoin `https://github.com/BlakeBitcoin/BlakeBitcoin.git` `master`
-  - Electron `https://github.com/BlueDragon747/Electron-ELT.git` `master`
-  - Photon `https://github.com/BlueDragon747/photon.git` `master`
-  - Lithium `https://github.com/BlueDragon747/lithium.git` `master`
-  - UniversalMolecule `https://github.com/BlueDragon747/universalmol.git` `master`
-- `MINING_KEY_SEGWIT_HRP` defaults to `blc`
-- `TrackerAddr` is the pool keep / fallback wallet
-- the child-chain pool payout addresses are generated automatically unless
-  `POOL_AUX_ADDRESS_*` overrides are supplied
-- `DASH_MINING_KEY_V2_COIN_HRPS` defaults to the full BlakeStream mainnet HRP set
+Remote install from a workstation, pulling daemon binaries:
 
-Container-mode example:
+```bash
+cd /path/to/Blakestream-Eliopool-15.21
+bash deploy-bundle/deploy-full-stack.sh root@your-vps --pull
+```
+
+Remote install with custom public host and ports:
+
+```bash
+cd /path/to/Blakestream-Eliopool-15.21
+PUBLIC_HOST=pool.example.com \
+STRATUM_PORT=3334 \
+DASHBOARD_PORT=18081 \
+bash deploy-bundle/deploy-full-stack.sh root@your-vps --pull
+```
+
+Remote dry-run. This checks SSH, arguments, and existing-runtime detection
+without changing the server:
+
+```bash
+cd /path/to/Blakestream-Eliopool-15.21
+bash deploy-bundle/deploy-full-stack.sh root@your-vps --dry-run
+```
+
+Remote install with password auth if SSH keys are not set up:
+
+```bash
+cd /path/to/Blakestream-Eliopool-15.21
+bash deploy-bundle/deploy-full-stack.sh your-vps root 'your-ssh-password'
+```
+
+### Full-Stack Flags
+
+| Flag | Meaning |
+| --- | --- |
+| default / `--local` | Build all six coin daemons from source on the target. This is slower but does not depend on published images. |
+| `--pull` | Pull `sidgrip/<coin>:15.21` images and extract daemon binaries. The final daemons still run as systemd services. |
+| `--bootstrap` | Download mainnet bootstraps. This is the default. |
+| `--no-bootstrap` | Skip bootstrap downloads and sync only from peers. |
+| `--dry-run` | Check the target and show what would happen without installing. |
+| `-h`, `--help` | Print usage. |
+
+### Full-Stack Environment Options
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `NETWORK_MODE` | `mainnet` | Set to `testnet` or `regtest` only when you do not want mainnet. |
+| `INSTALL_ROOT` | `/opt/blakestream-mainnet` | Runtime install path. |
+| `DATA_ROOT` | `/var/lib/blakestream-mainnet` | Coin datadirs and bootstrap staging. |
+| `LOG_ROOT` | `/var/log/blakestream-mainnet` | Pool, proxy, daemon, and dashboard logs. |
+| `PUBLIC_HOST` | target host / detected local IP | Hostname or IP shown on the dashboard and miner examples. |
+| `STRATUM_PORT` | `3334` | Public stratum port. |
+| `DASHBOARD_PORT` | `18081` | Public dashboard port. |
+| `DAEMON_IMAGE_NAMESPACE` | `sidgrip` | Image namespace used with `--pull`. |
+| `DAEMON_IMAGE_TAG` | `15.21` | Image tag used with `--pull`. |
+| `BOOTSTRAP_BASE_URL` | `https://bootstrap.blakestream.io` | Base URL for mainnet `bootstrap.dat` downloads. |
+| `MAINNET_SYNC_ROTATION` | `true` | Sync one daemon at a time before final service start. |
+| `START_LOCAL_PEERS` | `auto` | Start extra local peer daemons when RAM is sufficient. Use `true` or `false` to force. |
+| `USE_EXPLORER_PEERS` | `true` | Seed daemon configs with explorer-discovered peers on mainnet. |
+
+Mainnet bootstrap downloads are enabled by default. They run one coin at a time
+in a background task while daemon binaries are built or pulled. Existing
+`bootstrap.dat`, consumed `bootstrap.dat.old`, and partial `.tmp` downloads are
+preserved and reused on the next deploy attempt.
+
+After bootstraps are staged, the mainnet deploy performs a safe sync rotation
+by default. It starts one primary daemon, imports `bootstrap.dat`, catches up to
+the network tip, gracefully stops that daemon, then moves to the next coin.
+After all six are synced and stopped, it starts the final daemons one coin at a
+time, then starts the pool, proxy, and dashboard.
+
+Before deploying, the script scans the target for existing BlakeStream systemd
+units, daemon processes, and Docker containers and prints a summary. Existing
+managed services are stopped gracefully before redeploy. Coin datadirs are
+preserved.
+
+## Advanced Existing-Daemon Deploy
+
+`deploy.sh` is the older/advanced deploy path for installing Eloipool against
+daemon RPCs that already exist on a server. Use this only when you do not want
+the full-stack installer to manage daemon setup and sync.
+
+### Copy-Paste Existing-Daemon Installs
+
+Deploy against daemons already running on the VPS:
+
+```bash
+cd /path/to/Blakestream-Eliopool-15.21
+bash deploy-bundle/deploy.sh your-vps root
+```
+
+Deploy against existing daemons with a password:
+
+```bash
+cd /path/to/Blakestream-Eliopool-15.21
+bash deploy-bundle/deploy.sh your-vps root 'your-ssh-password'
+```
+
+Ask `deploy.sh` to provision daemons from Docker containers:
 
 ```bash
 cd /path/to/Blakestream-Eliopool-15.21
 DAEMON_INSTALL_MODE=container \
 DAEMON_IMAGE_NAMESPACE=sidgrip \
 DAEMON_IMAGE_TAG=15.21 \
+bash deploy-bundle/deploy.sh your-vps root
+```
+
+Ask `deploy.sh` to build daemons from source:
+
+```bash
+cd /path/to/Blakestream-Eliopool-15.21
+DAEMON_INSTALL_MODE=source \
+bash deploy-bundle/deploy.sh your-vps root
+```
+
+Deploy with explicit daemon RPC config paths:
+
+```bash
+cd /path/to/Blakestream-Eliopool-15.21
+BLC_RPC_CONF=/root/.blakecoin/blakecoin.conf \
+BBTC_RPC_CONF=/root/.blakebitcoin/blakebitcoin.conf \
+ELT_RPC_CONF=/root/.electron/electron.conf \
+LIT_RPC_CONF=/root/.lithium/lithium.conf \
+PHO_RPC_CONF=/root/.photon/photon.conf \
+UMO_RPC_CONF=/root/.universalmolecule/universalmolecule.conf \
+bash deploy-bundle/deploy.sh your-vps root
+```
+
+### `deploy.sh` Options
+
+`deploy.sh` accepts positional arguments only:
+
+```bash
 bash deploy-bundle/deploy.sh <host> [user] [password]
 ```
+
+Useful `deploy.sh` environment options:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DAEMON_INSTALL_MODE` | `existing` | `existing`, `container`, or `source`. |
+| `DAEMON_INSTALL_ROOT` | `/opt/blakestream-daemons` | Path used by `container` and `source` daemon provisioning. |
+| `DAEMON_IMAGE_NAMESPACE` | `sidgrip` | Image namespace used by `DAEMON_INSTALL_MODE=container`. |
+| `DAEMON_IMAGE_TAG` | `15.21` | Image tag used by `DAEMON_INSTALL_MODE=container`. |
+| `INSTALL_ROOT` | `/opt/blakecoin-pool` | Eloipool/proxy/dashboard install path. |
+| `LOG_ROOT` | `/var/log/blakecoin-pool` | Pool/proxy/dashboard logs. |
+| `PUBLIC_HOST` | target host | Hostname or IP shown on the dashboard. |
+| `STRATUM_PORT` | `3334` | Public stratum port. |
+| `DASHBOARD_PORT` | `8080` | Public dashboard port for `deploy.sh`. |
+| `MINING_KEY_SEGWIT_HRP` | `blc` | Parent-chain HRP for bare mining-key payout derivation. |
+| `TRACKER_ADDR` | generated when unset | Pool keep / fallback Blakecoin wallet address. |
+| `POOL_AUX_ADDRESS_*` | generated when unset | Optional fixed aux-chain pool payout addresses. |
+
+`deploy.sh` source mode uses these upstream repos:
+
+- Blakecoin `https://github.com/BlueDragon747/Blakecoin.git` `master`
+- BlakeBitcoin `https://github.com/BlakeBitcoin/BlakeBitcoin.git` `master`
+- Electron `https://github.com/BlueDragon747/Electron-ELT.git` `master`
+- Photon `https://github.com/BlueDragon747/photon.git` `master`
+- Lithium `https://github.com/BlueDragon747/lithium.git` `master`
+- UniversalMolecule `https://github.com/BlueDragon747/universalmol.git` `master`
 
 ## Redeploy Behavior
 

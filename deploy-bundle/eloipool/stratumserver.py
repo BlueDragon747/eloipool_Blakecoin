@@ -360,13 +360,17 @@ class StratumServer(networkserver.AsyncSocketServer):
 				self.rmSchedule(self.UpdateTask)
 			except:
 				pass
-		
-		self.updateJobOnly(wantClear=wantClear)
-		
-		self.WakeRequest = 1
-		self.wakeup()
-		
-		self.UpdateTask = self.schedule(self.updateJob, time() + self.WorkUpdateInterval)
+
+		# Bluedragon memory leak fix: wrap in try/finally so the periodic
+		# reschedule always fires. If updateJobOnly() raises, the original
+		# code dropped UpdateTask on the floor and the pool stalled — no
+		# more job pushes, miners idle out — until a manual restart.
+		try:
+			self.updateJobOnly(wantClear=wantClear)
+			self.WakeRequest = 1
+			self.wakeup()
+		finally:
+			self.UpdateTask = self.schedule(self.updateJob, time() + self.WorkUpdateInterval)
 	
 	def doQuickUpdate(self):
 		PQU = self._PendingQuickUpdates

@@ -33,6 +33,7 @@ _DISCONNECTED = frozenset((EHOSTUNREACH,ETIMEDOUT))
 class SocketHandler:
 	ac_in_buffer_size = 4096
 	ac_out_buffer_size = 4096
+	MaxWriteBuffer = 1048576
 	
 	def handle_close(self):
 		self.wbuf = None
@@ -146,6 +147,12 @@ class SocketHandler:
 			data = data[bs:]
 			if not len(data):
 				return
+		max_wbuf = getattr(self.server, 'MaxWriteBuffer', self.MaxWriteBuffer)
+		if max_wbuf and len(self.wbuf) + len(data) > max_wbuf:
+			logger = getattr(self, 'logger', logging.getLogger('SocketHandler'))
+			logger.warning('Closing slow client %r: write buffer would exceed %d bytes', self.addr, max_wbuf)
+			self.handle_close()
+			return
 		self.wbuf += data
 		self.server.register_socket_m(self.fd, EPOLL_READ | EPOLL_WRITE)
 	

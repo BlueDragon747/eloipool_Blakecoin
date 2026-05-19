@@ -82,6 +82,9 @@ GotWorkTarget = 0x00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffff
 POT = 2
 Greedy = False
 
+# Maximum queued outbound bytes per socket before a slow client is disconnected.
+SocketWriteBufferMax = 1048576
+
 # Listen addresses
 JSONRPCAddresses = (
     ('::ffff:127.0.0.1', @@POOL_JSONRPC_PORT@@),
@@ -96,6 +99,7 @@ ShareLogging = (
     {
         'type': 'logfile',
         'filename': @@SHARE_LOG_PATH@@,
+        'max_queue_size': 10000,
         'format': "{time} {Q(remoteHost)} {username} {YN(not(rejectReason))} {dash(YN(upstreamResult))} {dash(rejectReason)} {dash(target2bdiff(target))} {dash(_targethex)} {solution}\n",
     },
 )

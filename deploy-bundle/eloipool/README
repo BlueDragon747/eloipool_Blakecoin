@@ -43,14 +43,14 @@ The main deploy entrypoint for the full six-chain pool is:
 
 ```bash
 cd /path/to/Blakestream-Eliopool-15.21
-bash deploy-bundle/deploy-full-stack.sh -local
+bash deploy-bundle/deploy-full-stack.sh
 ```
 
 Use one of these two modes:
 
-- `-local`
-  Build all 6 coin daemons from source on the VPS, then deploy the pool.
-- `-pull`
+- default / `--local`
+  Build all 6 coin daemons from source on the current server, then deploy the pool.
+- `--pull`
   Pull the published BlakeStream daemon images from Docker Hub on the VPS, then deploy the pool.
 
 By default, the script deploys `mainnet`.
@@ -60,11 +60,80 @@ Set one of these only when you want a different network:
 - `NETWORK_MODE=testnet`
 - `NETWORK_MODE=regtest`
 
-Before deployment, the script checks the VPS for existing BlakeStream daemons,
-systemd units, and Docker containers, then tells you what it found. That check
-is only a safety summary. It does not switch modes for you.
+What the script does before it starts any wallet or daemon:
 
-Simple setup flow:
+1. checks the VPS for existing BlakeStream daemons, systemd units, and Docker containers
+2. creates the install, data, and log folders
+3. starts mainnet bootstrap downloads in the background unless `--no-bootstrap` is set
+4. uploads the pool bundle and builds or pulls daemon binaries
+5. creates each coin data directory and writes config files with RPC credentials and ports
+6. for mainnet only, fetches peers from the explorer and adds them to the config
+7. waits for bootstrap downloads, then syncs the primary daemons one at a time:
+   solo bootstrap import, peer catch-up, graceful stop, next coin
+8. after all six primary daemons are synced and stopped, starts daemon pairs one coin at a time
+9. brings up the pool, proxy, dashboard, and optional test miner
+
+That detection step is only a safety summary. It does not switch modes for you.
+
+Quick testnet deploy:
+
+- build from source on the VPS:
+
+```bash
+cd /path/to/Blakestream-Eliopool-15.21
+NETWORK_MODE=testnet \
+bash deploy-bundle/deploy-full-stack.sh
+```
+
+- pull the published daemon images on the VPS:
+
+```bash
+cd /path/to/Blakestream-Eliopool-15.21
+NETWORK_MODE=testnet \
+bash deploy-bundle/deploy-full-stack.sh --pull
+```
+
+Mainnet daemon prep behavior:
+
+- by default, the script will create the coin datadirs, write the configs,
+  fetch explorer peers, and download bootstrap files for `mainnet` before
+  starting the daemons
+- after downloads finish, `MAINNET_SYNC_ROTATION=true` makes the installer
+  sync one primary daemon at a time, gracefully stop it, then move to the next
+  coin; this avoids all six daemons importing large bootstrap files at once
+- once the rotation finishes, the script starts the final primary + local peer
+  daemon pairs one coin at a time before the pool services are started
+- use `--no-bootstrap` to skip bootstrap downloads and rely on p2p sync
+
+Example mainnet source build:
+
+```bash
+cd /path/to/Blakestream-Eliopool-15.21
+bash deploy-bundle/deploy-full-stack.sh
+```
+
+Example mainnet Docker Hub deploy:
+
+```bash
+cd /path/to/Blakestream-Eliopool-15.21
+bash deploy-bundle/deploy-full-stack.sh --pull
+```
+
+Example remote deploy from your workstation:
+
+```bash
+cd /path/to/Blakestream-Eliopool-15.21
+bash deploy-bundle/deploy-full-stack.sh root@your-vps
+```
+
+Remote smoke test without changing the server:
+
+```bash
+cd /path/to/Blakestream-Eliopool-15.21
+bash deploy-bundle/deploy-full-stack.sh root@your-vps --dry-run
+```
+
+Simple pool setup flow:
 
 1. Clone this repo on the VPS.
 
@@ -74,26 +143,32 @@ Simple setup flow:
 
 ```bash
 cd /path/to/Blakestream-Eliopool-15.21
-bash deploy-bundle/deploy-full-stack.sh -local
+bash deploy-bundle/deploy-full-stack.sh
 ```
 
 - Pull the published daemon images on the VPS:
 
 ```bash
 cd /path/to/Blakestream-Eliopool-15.21
-bash deploy-bundle/deploy-full-stack.sh -pull
+bash deploy-bundle/deploy-full-stack.sh --pull
 ```
 
-3. Set your main pool payout wallet.
+3. If needed, switch the network mode.
+
+- mainnet is the default deploy path
+- set `NETWORK_MODE=testnet` when you want the testnet config path
+- set `NETWORK_MODE=regtest` when you want the regtest config path
+
+4. Set your main pool payout wallet.
 
 - `TrackerAddr` is the main Blakecoin pool wallet
 - it receives the pool keep
 - it also receives any fallback or rounding remainder
 
-4. Set aux pool wallet addresses if you want fixed pool-controlled child-chain
+5. Set aux pool wallet addresses if you want fixed pool-controlled child-chain
 wallets.
 
-5. Run the deploy script.
+6. Run the deploy script.
 
 Example using local source builds:
 
@@ -105,7 +180,7 @@ POOL_AUX_ADDRESS_ELT='REPLACE_WITH_ELT_POOL_ADDRESS' \
 POOL_AUX_ADDRESS_LIT='REPLACE_WITH_LIT_POOL_ADDRESS' \
 POOL_AUX_ADDRESS_PHO='REPLACE_WITH_PHO_POOL_ADDRESS' \
 POOL_AUX_ADDRESS_UMO='REPLACE_WITH_UMO_POOL_ADDRESS' \
-bash deploy-bundle/deploy-full-stack.sh -local
+bash deploy-bundle/deploy-full-stack.sh
 ```
 
 Example using Docker Hub daemon images:
@@ -118,10 +193,10 @@ POOL_AUX_ADDRESS_ELT='REPLACE_WITH_ELT_POOL_ADDRESS' \
 POOL_AUX_ADDRESS_LIT='REPLACE_WITH_LIT_POOL_ADDRESS' \
 POOL_AUX_ADDRESS_PHO='REPLACE_WITH_PHO_POOL_ADDRESS' \
 POOL_AUX_ADDRESS_UMO='REPLACE_WITH_UMO_POOL_ADDRESS' \
-bash deploy-bundle/deploy-full-stack.sh -pull
+bash deploy-bundle/deploy-full-stack.sh --pull
 ```
 
-6. Open the dashboard and test mining.
+7. Open the dashboard and test mining.
 
 - mine to the stratum port shown by the dashboard
 - use a bare mining key or a direct address as the miner username
@@ -129,9 +204,12 @@ bash deploy-bundle/deploy-full-stack.sh -pull
 Notes:
 
 - the script does not install an SSH key
-- the script stops existing BlakeStream services before redeploy, but it does not wipe the host or datadirs
+- `--dry-run` checks the target and prints the selected deploy plan without changing the server
+- the script stops existing BlakeStream services gracefully before redeploy, but it does not wipe the host or datadirs
 - source mode pulls the upstream coin repos from their `master` branches and builds on the VPS
 - pull mode uses the published `sidgrip/<coin>:15.21` daemon images
+- bootstrap downloads are for mainnet only and can be disabled with `--no-bootstrap`
+- mainnet peer fetch is from the explorer and is written into the generated coin configs
 
 
 Mining Username Format
@@ -161,8 +239,8 @@ Important Files
 - `merged-mine-proxy.py3`
   The aux-chain merged-mining proxy. This is where the 5 child chains attach.
 
-- `deploy-bundle/deploy.sh`
-  The easiest way to deploy the full pool.
+- `deploy-bundle/deploy-full-stack.sh`
+  The active deploy entrypoint for the staged six-chain deploy flow.
 
 - `deploy-bundle/config.py.template`
   The template used by the deploy script to render the live Eloipool config on
