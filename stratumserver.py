@@ -50,6 +50,7 @@ StratumCodes = {
 	'duplicate': 22,
 	'H-not-zero': 23,
 	'high-hash': 23,
+	'gotwork-unavailable': 20,
 }
 
 class StratumHandler(networkserver.SocketHandler):

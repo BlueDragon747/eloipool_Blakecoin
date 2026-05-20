@@ -151,7 +151,13 @@ FINAL_DAEMON_SETTLE_S="${FINAL_DAEMON_SETTLE_S:-8}"
 FINAL_MIN_AVAILABLE_RAM_MB="${FINAL_MIN_AVAILABLE_RAM_MB:-1024}"
 FINAL_MAX_SWAP_USED_MB="${FINAL_MAX_SWAP_USED_MB:-2048}"
 USE_EXPLORER_PEERS="${USE_EXPLORER_PEERS:-true}"
-REPO_SYNC_ROOT="${REPO_SYNC_ROOT:-$ROOT}"
+if [ -z "${REPO_SYNC_ROOT:-}" ]; then
+    if [ "$RUN_LOCAL" = "1" ]; then
+        REPO_SYNC_ROOT="$ROOT"
+    else
+        REPO_SYNC_ROOT="${INSTALL_ROOT}/source-repo"
+    fi
+fi
 REMOTE_BUILD_JOBS="${REMOTE_BUILD_JOBS:-$(nproc)}"
 REMOTE_DB4_PREFIX="${REMOTE_DB4_PREFIX:-${INSTALL_ROOT}/db4}"
 DAEMON_IMAGE_NAMESPACE="${DAEMON_IMAGE_NAMESPACE:-sidgrip}"
@@ -613,11 +619,11 @@ stop_unit_gracefully() {
     stop_unit_gracefully "$unit"
 done
 if command -v docker >/dev/null 2>&1; then
-    docker ps -a --format '{{.Names}}' | grep -E "^(${SERVICE_PREFIX}|blakestream-testnet)-" | while read -r container; do
+    while read -r container; do
         [ -n "${container}" ] || continue
         docker stop --time "${SERVICE_STOP_TIMEOUT_S}" "${container}" >/dev/null 2>&1 || true
         docker rm "${container}" >/dev/null 2>&1 || docker rm -f "${container}" >/dev/null 2>&1 || true
-    done
+    done < <(docker ps -a --format '{{.Names}}' | grep -E "^(${SERVICE_PREFIX}|blakestream-testnet)-" || true)
 fi
 systemctl daemon-reload
 REMOTE
@@ -1609,6 +1615,7 @@ UpstreamBitcoindNode = ('127.0.0.1', ${P2P_PORT_BLC})
 UpstreamNetworkId = b'\\xfc\\xc1\\xb7\\xdc'
 SecretUser = '${POOL_SECRET_USER}'
 GotWorkURI = 'http://${POOL_SECRET_USER}:${POOL_SECRET_PASS}@127.0.0.1:${PROXY_PORT}/'
+RequireGotworkReady = True
 GotWorkTarget = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 POT = 2
 Greedy = False
@@ -1697,6 +1704,7 @@ Group=${RUN_GROUP}
 WorkingDirectory=${INSTALL_ROOT}/eloipool
 Environment=PYTHONUNBUFFERED=1
 ExecStart=${INSTALL_ROOT}/venv/bin/python -u ${INSTALL_ROOT}/eloipool/merged-mine-proxy.py3 -w ${PROXY_PORT} -p http://${POOL_SECRET_USER}:${POOL_SECRET_PASS}@127.0.0.1:${POOL_JSONRPC_PORT}/ -s ${MERKLE_SIZE} -x http://${NODE_RPC_USER}:${NODE_RPC_PASS}@127.0.0.1:${RPC_PORT_BBTC}/ -a ${POOL_AUX_ADDRESS_BBTC} -x http://${NODE_RPC_USER}:${NODE_RPC_PASS}@127.0.0.1:${RPC_PORT_ELT}/ -a ${POOL_AUX_ADDRESS_ELT} -x http://${NODE_RPC_USER}:${NODE_RPC_PASS}@127.0.0.1:${RPC_PORT_LIT}/ -a ${POOL_AUX_ADDRESS_LIT} -x http://${NODE_RPC_USER}:${NODE_RPC_PASS}@127.0.0.1:${RPC_PORT_PHO}/ -a ${POOL_AUX_ADDRESS_PHO} -x http://${NODE_RPC_USER}:${NODE_RPC_PASS}@127.0.0.1:${RPC_PORT_UMO}/ -a ${POOL_AUX_ADDRESS_UMO}
+ExecStartPost=/bin/sh -c 'for i in \$(seq 1 30); do ss -ltn | grep -q ":${PROXY_PORT}" && exit 0; sleep 1; done; echo "ERROR: merged-mine proxy port ${PROXY_PORT} did not bind" >&2; exit 1'
 StandardOutput=append:${LOG_ROOT}/merged-mine-proxy.stdout
 StandardError=append:${LOG_ROOT}/merged-mine-proxy.log
 Restart=always
@@ -1712,7 +1720,7 @@ cat > "$STAGE_ROOT/systemd/${UNIT_DASHBOARD}" <<EOF
 [Unit]
 Description=BlakeStream ${NETWORK_DISPLAY} pool dashboard
 After=${UNIT_POOL} ${UNIT_PROXY}
-Requires=${UNIT_POOL}
+Requires=${UNIT_POOL} ${UNIT_PROXY}
 
 [Service]
 Type=simple
@@ -1789,28 +1797,75 @@ if command -v ufw >/dev/null 2>&1; then
 fi
 REMOTE
 
-if [ "${ENABLE_CPU_MINER}" = "true" ]; then
-    say "Starting pool, proxy, dashboard, and single-core miner"
-    run_ssh <<REMOTE
+gate_public_stratum() {
+    say "Temporarily gating public stratum until the merged-mining proxy is ready"
+    run_ssh "STRATUM_PORT=$(quote_remote "$STRATUM_PORT") bash -s" <<'REMOTE'
 set -euo pipefail
-systemctl daemon-reload
-systemctl enable --now \
-  ${UNIT_POOL} \
-  ${UNIT_PROXY} \
-  ${UNIT_DASHBOARD} \
-  ${UNIT_MINER}
-REMOTE
+remove_gate() {
+    if command -v iptables >/dev/null 2>&1; then
+        while iptables -D INPUT -p tcp --dport "${STRATUM_PORT}" ! -s 127.0.0.1/32 -m comment --comment blakestream-stratum-startup-gate -j REJECT --reject-with tcp-reset 2>/dev/null; do :; done
+    fi
+    if command -v ip6tables >/dev/null 2>&1; then
+        while ip6tables -D INPUT -p tcp --dport "${STRATUM_PORT}" ! -s ::1/128 -m comment --comment blakestream-stratum-startup-gate -j REJECT --reject-with tcp-reset 2>/dev/null; do :; done
+    fi
+}
+remove_gate
+if command -v iptables >/dev/null 2>&1; then
+    iptables -I INPUT 1 -p tcp --dport "${STRATUM_PORT}" ! -s 127.0.0.1/32 -m comment --comment blakestream-stratum-startup-gate -j REJECT --reject-with tcp-reset
 else
-    say "Starting pool, proxy, and dashboard"
-    run_ssh <<REMOTE
+    echo "WARNING: iptables not available; cannot gate public stratum during startup" >&2
+fi
+if command -v ip6tables >/dev/null 2>&1; then
+    ip6tables -I INPUT 1 -p tcp --dport "${STRATUM_PORT}" ! -s ::1/128 -m comment --comment blakestream-stratum-startup-gate -j REJECT --reject-with tcp-reset || true
+fi
+REMOTE
+    STRATUM_GATE_ARMED=1
+}
+
+ungate_public_stratum() {
+    say "Removing temporary public stratum startup gate"
+    run_ssh "STRATUM_PORT=$(quote_remote "$STRATUM_PORT") bash -s" <<'REMOTE'
+set -euo pipefail
+if command -v iptables >/dev/null 2>&1; then
+    while iptables -D INPUT -p tcp --dport "${STRATUM_PORT}" ! -s 127.0.0.1/32 -m comment --comment blakestream-stratum-startup-gate -j REJECT --reject-with tcp-reset 2>/dev/null; do :; done
+fi
+if command -v ip6tables >/dev/null 2>&1; then
+    while ip6tables -D INPUT -p tcp --dport "${STRATUM_PORT}" ! -s ::1/128 -m comment --comment blakestream-stratum-startup-gate -j REJECT --reject-with tcp-reset 2>/dev/null; do :; done
+fi
+REMOTE
+    STRATUM_GATE_ARMED=0
+}
+
+STRATUM_GATE_ARMED=0
+cleanup_stratum_gate() {
+    local status=$?
+    if [ "${STRATUM_GATE_ARMED}" = "1" ]; then
+        if [ "$status" -eq 0 ]; then
+            ungate_public_stratum || true
+        else
+            warn "leaving public stratum gated because deploy failed before proxy readiness"
+        fi
+    fi
+    exit "$status"
+}
+
+trap cleanup_stratum_gate EXIT
+# Operator note:
+# Public stratum is intentionally closed during pool/proxy startup. Eloipool
+# can bind its miner socket before the merged-mining proxy has returned a
+# usable aux template, and accepting shares in that window causes confusing
+# gotwork/proxy failures. The deploy only removes this temporary firewall gate
+# after wait_for_proxy_aux_ready proves that the proxy can answer getaux with
+# a usable aux blob or a positive ready_count.
+gate_public_stratum
+
+say "Starting pool, proxy, and dashboard in readiness order"
+run_ssh "UNIT_POOL=$(quote_remote "$UNIT_POOL") UNIT_PROXY=$(quote_remote "$UNIT_PROXY") UNIT_DASHBOARD=$(quote_remote "$UNIT_DASHBOARD") bash -s" <<'REMOTE'
 set -euo pipefail
 systemctl daemon-reload
-systemctl enable --now \
-  ${UNIT_POOL} \
-  ${UNIT_PROXY} \
-  ${UNIT_DASHBOARD}
+systemctl enable "${UNIT_POOL}" "${UNIT_PROXY}" "${UNIT_DASHBOARD}" >/dev/null
+systemctl start "${UNIT_POOL}"
 REMOTE
-fi
 
 wait_for_service() {
     local svc="$1"
@@ -1818,10 +1873,96 @@ wait_for_service() {
     run_ssh "for _ in \$(seq 1 60); do systemctl is-active --quiet $(quote_remote "$svc") && exit 0; sleep 1; done; exit 1"
 }
 
+wait_for_tcp() {
+    local port="$1"
+    local label="$2"
+    say "Waiting for ${label} on 127.0.0.1:${port}"
+    run_ssh "PORT=$(quote_remote "$port") bash -s" <<'REMOTE'
+set -euo pipefail
+for _ in $(seq 1 90); do
+    if timeout 2 bash -c ":</dev/tcp/127.0.0.1/${PORT}" 2>/dev/null; then
+        exit 0
+    fi
+    sleep 1
+done
+exit 1
+REMOTE
+}
+
+wait_for_proxy_aux_ready() {
+    local port="$1"
+    say "Waiting for merged-mining proxy aux templates"
+    run_ssh "PORT=$(quote_remote "$port") bash -s" <<'REMOTE'
+set -euo pipefail
+payload='{"jsonrpc":"2.0","id":1,"method":"getaux","params":[]}'
+for _ in $(seq 1 180); do
+    response="$(curl -fsS --max-time 8 -H 'Content-Type: application/json' --data-binary "${payload}" "http://127.0.0.1:${PORT}/" 2>/dev/null || true)"
+    if [ -n "${response}" ] && python3 - "${response}" <<'PY'
+import json
+import sys
+
+try:
+    body = json.loads(sys.argv[1])
+except Exception:
+    sys.exit(1)
+result = body.get('result') if isinstance(body, dict) else None
+if not isinstance(result, dict) or result.get('error'):
+    sys.exit(1)
+try:
+    ready = int(result.get('ready_count') or 0)
+except Exception:
+    ready = 0
+# Newer proxy responses include ready_count; older/cache-compatible responses
+# may only include aux. Either is acceptable because the pool needs a usable
+# aux blob before public miners are allowed to submit shares.
+has_aux = bool(result.get('aux'))
+sys.exit(0 if ready > 0 or has_aux else 1)
+PY
+    then
+        python3 - "${response}" <<'PY'
+import json
+import sys
+
+body = json.loads(sys.argv[1])
+result = body.get('result') or {}
+ready = result.get('ready_count', 0)
+total = result.get('total_chains', 0)
+waiting = result.get('waiting_chains') or []
+names = [str(row.get('name') or row.get('chain') or row.get('alias') or '?') for row in waiting]
+suffix = ''
+if names:
+    suffix = '; waiting on ' + ', '.join(names)
+if ready or total:
+    print('proxy aux templates: %s/%s ready%s' % (ready, total, suffix))
+else:
+    print('proxy aux templates: ready')
+PY
+        exit 0
+    fi
+    sleep 1
+done
+echo "ERROR: merged-mining proxy has no usable aux templates" >&2
+exit 1
+REMOTE
+}
+
 wait_for_service "$UNIT_POOL"
+wait_for_tcp "$POOL_JSONRPC_PORT" "pool JSON-RPC"
+run_ssh "systemctl start $(quote_remote "$UNIT_PROXY")"
 wait_for_service "$UNIT_PROXY"
+wait_for_tcp "$PROXY_PORT" "merged-mining proxy"
+wait_for_proxy_aux_ready "$PROXY_PORT"
+run_ssh "systemctl start $(quote_remote "$UNIT_DASHBOARD")"
 wait_for_service "$UNIT_DASHBOARD"
+ungate_public_stratum
+
 if [ "${ENABLE_CPU_MINER}" = "true" ]; then
+    say "Starting single-core miner"
+    run_ssh "UNIT_MINER=$(quote_remote "$UNIT_MINER") bash -s" <<'REMOTE'
+set -euo pipefail
+systemctl enable "${UNIT_MINER}" >/dev/null
+systemctl start "${UNIT_MINER}"
+REMOTE
     wait_for_service "$UNIT_MINER"
 
     say "Waiting for parent and child heights to start moving under live mining"

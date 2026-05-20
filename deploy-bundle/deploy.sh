@@ -657,6 +657,7 @@ say "Writing ${INSTALL_ROOT}/config/proxy.env"
 PROXY_ENV_TMP="$TMPDIR/proxy.env"
 : > "$PROXY_ENV_TMP"
 write_env_line "$PROXY_ENV_TMP" PROXY_ARGS "$PROXY_ARGS"
+write_env_line "$PROXY_ENV_TMP" PROXY_PORT "$PROXY_PORT"
 run_scp "$PROXY_ENV_TMP" "${USER}@${HOST}:${INSTALL_ROOT}/config/proxy.env"
 run_ssh "chown ${POOL_USER}:${POOL_GROUP} ${INSTALL_ROOT}/config/proxy.env && chmod 600 ${INSTALL_ROOT}/config/proxy.env"
 

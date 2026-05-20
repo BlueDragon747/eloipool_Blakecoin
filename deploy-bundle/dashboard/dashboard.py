@@ -42,6 +42,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from collections import deque
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
@@ -219,6 +220,52 @@ def derive_v2_addresses(mining_key, primary_hrp=None):
         'derived_addresses': derived_addresses,
     }
 
+def human_rpc_error(error, method=None):
+    """Turn transport/RPC failures into dashboard-safe operator messages."""
+    if isinstance(error, urllib.error.HTTPError):
+        if error.code == 401:
+            return 'RPC authentication failed'
+        if error.code == 403:
+            return 'RPC access denied'
+        return f'RPC HTTP error {error.code}'
+
+    if isinstance(error, urllib.error.URLError):
+        reason = error.reason
+        errno = getattr(reason, 'errno', None)
+        text = str(reason)
+        if isinstance(reason, ConnectionRefusedError) or errno == 111 or 'Connection refused' in text:
+            return 'RPC unavailable: daemon is not accepting connections'
+        if isinstance(reason, (TimeoutError, socket.timeout)) or 'timed out' in text.lower():
+            return 'RPC timeout: daemon did not answer in time'
+        if isinstance(reason, socket.gaierror):
+            return 'RPC unavailable: hostname could not be resolved'
+        return 'RPC transport error'
+
+    if isinstance(error, TimeoutError) or isinstance(error, socket.timeout):
+        return 'RPC timeout: daemon did not answer in time'
+
+    if isinstance(error, dict):
+        code = error.get('code')
+        message = str(error.get('message') or 'daemon returned an error')
+        if code is not None:
+            return f'RPC error {code}: {message}'
+        return f'RPC error: {message}'
+
+    text = str(error)
+    if text.startswith('RPC '):
+        return text
+    if 'Connection refused' in text or '[Errno 111]' in text:
+        return 'RPC unavailable: daemon is not accepting connections'
+    if 'timed out' in text.lower():
+        return 'RPC timeout: daemon did not answer in time'
+    return f'RPC error while calling {method}' if method else 'RPC error'
+
+
+def chain_error_message(label, error):
+    ticker = CHAIN_TICKERS.get(label, label)
+    return f'{ticker}: {human_rpc_error(error)}'
+
+
 def rpc_url(url, method, params=None):
     # Parse user:pass out of the URL ourselves — urllib's urlopen doesn't
     # forward URL-embedded basic auth, it tries to DNS-resolve the userinfo.
@@ -241,10 +288,10 @@ def rpc_url(url, method, params=None):
         with urllib.request.urlopen(req, timeout=5) as r:
             body = json.loads(r.read())
         if body.get('error'):
-            return {'_error': body['error']}
+            return {'_error': human_rpc_error(body['error'], method)}
         return body['result']
     except Exception as e:
-        return {'_error': str(e)}
+        return {'_error': human_rpc_error(e, method)}
 
 
 def rpc(method, params=None):
@@ -372,7 +419,7 @@ def build_chain_overview(parent_chain):
         if not isinstance(info, dict) or info.get('_error'):
             row.update({
                 'status': 'error',
-                'error': redact_sensitive_log_text(str(info.get('_error') if isinstance(info, dict) else info)),
+                'error': redact_sensitive_log_text(chain_error_message(label, info.get('_error') if isinstance(info, dict) else info)),
             })
             rows.append(row)
             continue
@@ -2036,16 +2083,16 @@ def read_service_summary():
         return None
 
 
-def derive_status(chain, pool_lines, identities, blocks, service_summary=None):
+def derive_status(chain, pool_lines, identities, blocks, service_summary=None, live_socket_count=0):
     """One-glance health: MINING / IDLE / STALLED / DEGRADED / DOWN
 
     Logic (top of list wins):
       - DOWN     : daemon RPC unreachable
       - DEGRADED : daemon up but no recent GBT template lines (pool not polling)
       - IDLE     : explicit zero-miner rehearsal mode from the pool supervisor
-      - STALLED  : pool polling but no identity has been active in last 5 min
-      - MINING   : pool polling AND >=1 identity active AND >=1 block solved in last 10 min
-      - IDLE     : pool polling AND >=1 identity active but no recent solve
+      - MINING   : pool polling AND >=1 identity submitted a recent share
+      - STALLED  : pool polling AND miner sockets exist but no recent shares
+      - IDLE     : pool polling but no miners are active
     """
     if not isinstance(chain, dict) or '_error' in chain:
         return 'DOWN'
@@ -2066,13 +2113,10 @@ def derive_status(chain, pool_lines, identities, blocks, service_summary=None):
             return 'IDLE'
 
     active = [i for i in identities if i.get('active')]
-    if not active:
-        return 'STALLED'
-
-    now = time.time()
-    last_block = max((i.get('last_share') or 0 for i in identities if i.get('blocks')), default=0)
-    if last_block and (now - last_block) < 600:
+    if active:
         return 'MINING'
+    if live_socket_count or any(i.get('host_has_socket') for i in identities):
+        return 'STALLED'
     return 'IDLE'
 
 
@@ -5711,7 +5755,14 @@ def api_state():
     last_block_ts = max((b.get('ts') or 0 for b in solved_all), default=0)
 
     service_summary = read_service_summary()
-    status = derive_status(chain, pool_lines, identities, solved, service_summary=service_summary)
+    status = derive_status(
+        chain,
+        pool_lines,
+        identities,
+        solved,
+        service_summary=service_summary,
+        live_socket_count=len(connections),
+    )
 
     response = jsonify({
         'run_timestamp': RUN_TIMESTAMP,
