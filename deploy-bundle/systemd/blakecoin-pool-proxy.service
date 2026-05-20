@@ -13,6 +13,7 @@ EnvironmentFile=-@@INSTALL_ROOT@@/config/proxy.env
 Environment=PYTHONPATH=@@INSTALL_ROOT@@/config:@@INSTALL_ROOT@@/eloipool/vendor:@@INSTALL_ROOT@@/eloipool:@@INSTALL_ROOT@@
 Environment=PYTHONUNBUFFERED=1
 ExecStart=/bin/bash -lc 'exec @@INSTALL_ROOT@@/venv/bin/python -u @@INSTALL_ROOT@@/eloipool/merged-mine-proxy.py3 ${PROXY_ARGS}'
+ExecStartPost=/bin/bash -lc 'for i in $(seq 1 30); do ss -ltn | grep -q ":${PROXY_PORT:-19335}" && exit 0; sleep 1; done; echo "ERROR: merged-mine proxy port ${PROXY_PORT:-19335} did not bind" >&2; exit 1'
 StandardInput=null
 StandardOutput=append:@@LOG_ROOT@@/merged-mine-proxy.stdout
 StandardError=append:@@LOG_ROOT@@/merged-mine-proxy.log

@@ -229,9 +229,18 @@ if hasattr(config, 'GotWorkURI'):
 
 _gotworkAuxCache = {}
 _gotworkAuxCacheTTL = 1
+_gotworkReadyCache = {'ts': 0, 'ok': False}
+_gotworkReadyCacheTTL = 1
+_gotworkWarningCache = {'ts': 0, 'msg': None}
+_gotworkWarningTTL = 30
+_gotworkPartialCache = {'ts': 0, 'msg': None}
+_gotworkPartialTTL = 60
 
 if not hasattr(config, 'DelayLogForUpstream'):
 	config.DelayLogForUpstream = False
+
+if not hasattr(config, 'RequireGotworkReady'):
+	config.RequireGotworkReady = False
 
 if not hasattr(config, 'DynamicTargetting'):
 	config.DynamicTargetting = 0
@@ -250,15 +259,71 @@ def _redactedGotworkURI():
 		return '%s://<redacted>@%s' % (scheme, rest.rsplit('@', 1)[-1])
 	return uri
 
+def _gotworkLogger():
+	return getattr(checkShare, 'logger', logging.getLogger('checkShare'))
+
+def _formatGotworkReadiness(resp):
+	if not isinstance(resp, dict):
+		return 'unexpected proxy response'
+	err = resp.get('error') or 'proxy not ready'
+	ready_count = resp.get('ready_count')
+	total_chains = resp.get('total_chains')
+	waiting = resp.get('waiting_chains') or []
+	if ready_count is None or total_chains is None:
+		return str(err)
+	waiting_bits = []
+	for row in waiting:
+		if not isinstance(row, dict):
+			continue
+		chain = row.get('chain') or row.get('alias') or 'unknown'
+		alias = row.get('alias')
+		status = row.get('status') or 'not-ready'
+		chain_id = row.get('chain_id')
+		label = '%s/%s' % (alias, chain) if alias and alias != chain else str(chain)
+		if chain_id is not None:
+			label += ' id:%s' % chain_id
+		waiting_bits.append('%s %s' % (label, status))
+	if waiting_bits:
+		return '%s; aux readiness %s/%s; waiting for %s' % (
+			err, ready_count, total_chains, ', '.join(waiting_bits)
+		)
+	return '%s; aux readiness %s/%s' % (err, ready_count, total_chains)
+
+def _warnGotworkUnavailable(reason):
+	now = time()
+	reason = str(reason or 'not ready')
+	cache = _gotworkWarningCache
+	if reason == cache.get('msg') and now <= cache.get('ts', 0) + _gotworkWarningTTL:
+		return
+	cache['ts'] = now
+	cache['msg'] = reason
+	_gotworkLogger().warning(
+		'Rejecting shares: merged-mining proxy not ready; %s (endpoint %s)'
+		% (reason, _redactedGotworkURI())
+	)
+
+def _warnGotworkPartial(reason):
+	now = time()
+	reason = str(reason or 'partial aux readiness')
+	cache = _gotworkPartialCache
+	if reason == cache.get('msg') and now <= cache.get('ts', 0) + _gotworkPartialTTL:
+		return
+	cache['ts'] = now
+	cache['msg'] = reason
+	_gotworkLogger().warning(
+		'Mining continues with partial aux readiness at %s (%s)'
+		% (_redactedGotworkURI(), reason)
+	)
+
 def submitGotwork(info):
 	try:
 		gotwork.gotwork(info)
 	except Exception as e:
-		checkShare.logger.warning(
+		_gotworkLogger().warning(
 			'Gotwork submit failed: merged-mining proxy unavailable at %s (%s: %s)'
 			% (_redactedGotworkURI(), e.__class__.__name__, e)
 		)
-		checkShare.logger.debug('Gotwork submit traceback\n' + traceback.format_exc())
+		_gotworkLogger().debug('Gotwork submit traceback\n' + traceback.format_exc())
 
 def getGotworkCoinbaseAux(username):
 	if not gotwork or not username:
@@ -270,7 +335,13 @@ def getGotworkCoinbaseAux(username):
 	try:
 		resp = gotwork.getaux({'username': username})
 		if not isinstance(resp, dict):
+			_warnGotworkUnavailable('unexpected proxy response')
 			return None
+		if resp.get('error'):
+			_warnGotworkUnavailable(_formatGotworkReadiness(resp))
+			return None
+		if resp.get('warning'):
+			_warnGotworkPartial(_formatGotworkReadiness(resp))
 		auxhex = resp.get('coinbaseaux')
 		if not auxhex:
 			auxhex = resp.get('mm_aux')
@@ -279,13 +350,31 @@ def getGotworkCoinbaseAux(username):
 			if auxhex:
 				auxhex = 'fabe6d6d' + auxhex
 		if not auxhex:
+			_warnGotworkUnavailable('proxy response missing coinbase aux')
 			return None
 		auxmap = {'MM': bytes.fromhex(auxhex)}
 		_gotworkAuxCache[username] = (now, auxmap)
 		return auxmap
-	except:
-		checkShare.logger.debug('Per-user gotwork aux lookup failed for %r\n%s' % (username, traceback.format_exc()))
+	except Exception as e:
+		_warnGotworkUnavailable('proxy RPC unavailable: %s: %s' % (e.__class__.__name__, e))
+		_gotworkLogger().debug('Per-user gotwork aux lookup failed for %r\n%s' % (username, traceback.format_exc()))
 		return None
+
+def gotworkReady(username = None):
+	# Runtime safety valve for merged mining:
+	# even after stratum is open, do not accept a miner share unless the
+	# merged-mining proxy can provide a usable per-miner aux template. If the
+	# proxy has no aux blob yet, the share is rejected as gotwork-unavailable
+	# instead of being accepted into a submit path that cannot build aux work.
+	if not gotwork or not getattr(config, 'RequireGotworkReady', False):
+		return True
+	now = time()
+	cache = _gotworkReadyCache
+	if now <= cache['ts'] + _gotworkReadyCacheTTL:
+		return cache['ok']
+	cache['ts'] = now
+	cache['ok'] = getGotworkCoinbaseAux(username) is not None
+	return cache['ok']
 
 if not hasattr(config, 'GotWorkTarget'):
 	config.GotWorkTarget = 0
@@ -578,6 +667,13 @@ def checkShare(share):
 	shareTime = share['time'] = time()
 	
 	username = share['username']
+	# Keep stratum honest during daemon/proxy lag. A missing aux template means
+	# the pool is not ready to account merged-mined work for this share, so the
+	# miner gets a clear gotwork-unavailable reject instead of a later opaque
+	# submit failure.
+	if not gotworkReady(username):
+		raise RejectedShare('gotwork-unavailable')
+
 	checkQuickDiffAdjustment = False
 	if 'data' in share:
 		# getwork/GBT

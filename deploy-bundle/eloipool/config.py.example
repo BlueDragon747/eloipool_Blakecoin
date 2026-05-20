@@ -251,6 +251,12 @@ SecretUser = POOL_SECRET_USER
 
 GotWorkURI = PARENT_GOTWORK_URI
 
+# Runtime merged-mining safety guard. When enabled, Eloipool checks that the
+# merged-mining proxy can return a usable aux template before accepting a
+# stratum share. If no aux template exists yet, the share is rejected as
+# gotwork-unavailable instead of being accepted into a broken submit path.
+RequireGotworkReady = True
+
 # Share hashes must be below this to be submitted to gotwork
 GotWorkTarget = 0x00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 

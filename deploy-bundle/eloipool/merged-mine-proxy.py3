@@ -50,7 +50,7 @@ except ImportError:
 
 __version__ = '0.2.4-py3'
 
-AUX_UPDATE_INTERVAL = 1
+AUX_UPDATE_INTERVAL = 15
 MERKLE_TREES_TO_KEEP = 240
 # Keep per-solver aux templates very fresh on fast devnet runs so queued child
 # mempool transactions have a chance to land before the next merged solve.
@@ -58,6 +58,13 @@ AUX_SOLVER_CACHE_TTL = 1
 
 # Chain name mapping for logging (matches database naming)
 CHAIN_NAMES = {0: 'MM', 1: 'MM1', 2: 'MM3', 3: 'MM4', 4: 'MM5'}
+CHAIN_DISPLAY_NAMES = {
+    0: 'BlakeBitcoin',
+    1: 'Electron',
+    2: 'Lithium',
+    3: 'Photon',
+    4: 'UniversalMolecule',
+}
 VERSIONBITS_TOP_MASK = 0xE0000000
 VERSIONBITS_TOP_BITS = 0x20000000
 AUXPOW_VERSION_BIT = 8
@@ -73,6 +80,11 @@ KNOWN_VERSIONBIT_NAMES = {
 def get_chain_name(chain_idx):
     """Get display name for chain index"""
     return CHAIN_NAMES.get(chain_idx, 'MM%d' % chain_idx)
+
+
+def get_chain_display_name(chain_idx):
+    """Get operator-facing chain name for a configured aux index."""
+    return CHAIN_DISPLAY_NAMES.get(chain_idx, get_chain_name(chain_idx))
 
 
 def summarize_aux_version_bits(aux_block, default_chain_id=None):
@@ -181,11 +193,11 @@ class Error(Exception):
         }
 
 class Proxy(object):
-    MAX_RETRIES = 3
-    CONNECT_TIMEOUT = 30
+    MAX_RETRIES = 1
+    CONNECT_TIMEOUT = 8
     IDLE_TIMEOUT = 1800  # Force reconnect after 30 minutes idle
     MAX_CONSECUTIVE_FAILURES = 5  # Circuit breaker threshold
-    BREAKER_COOLDOWN_S = 30  # Half-open probe after this many seconds
+    BREAKER_COOLDOWN_S = 15  # Half-open probe after this many seconds
     
     def __init__(self, url):
         (schema, netloc, path, query, fragment) = urlsplit(url)
@@ -466,8 +478,10 @@ class Listener(Server):
             raise ValueError('merkle size up to 255')
         # Python 3 fix: use bytes for empty path
         self.putChild(b'', self)
-        # Start aux update process
-        self.update_aux_process()
+        # Aux template refresh starts after the TCP listener is bound. RPC
+        # calls are synchronous in this legacy proxy, so doing this inside
+        # __init__ can delay port binding long enough for systemd readiness
+        # checks to fail on slower daemon startups.
         # Start periodic status reporting
         self.status_report_process()
 
@@ -691,6 +705,60 @@ class Listener(Server):
     def _count_healthy_chains(self):
         """Count number of healthy chains"""
         return len(self._get_healthy_chains())
+
+    def _aux_readiness(self):
+        readiness = []
+        for i in range(len(self.auxs)):
+            health = self.chain_health.get(i, {})
+            chain_id = self.chain_ids[i] if i < len(self.chain_ids) else None
+            target = self.aux_targets[i] if i < len(self.aux_targets) else None
+            healthy = self._is_chain_healthy(i)
+            ready = bool(healthy and chain_id is not None and target)
+            if ready:
+                status = 'ready'
+            elif not healthy:
+                status = 'unhealthy'
+            else:
+                status = 'syncing'
+            readiness.append({
+                'chain_idx': i,
+                'alias': get_chain_name(i),
+                'chain': get_chain_display_name(i),
+                'chain_id': chain_id,
+                'ready': ready,
+                'status': status,
+                'failures': int(health.get('failures', 0) or 0),
+            })
+        return readiness
+
+    def _aux_readiness_payload(self):
+        readiness = self._aux_readiness()
+        ready = [row for row in readiness if row['ready']]
+        waiting = [row for row in readiness if not row['ready']]
+        return {
+            'ready_count': len(ready),
+            'total_chains': len(readiness),
+            'ready_chains': ready,
+            'waiting_chains': waiting,
+            'readiness': readiness,
+        }
+
+    def _format_aux_readiness(self, payload):
+        def describe(row):
+            chain_id = row.get('chain_id')
+            id_part = 'id:%s' % chain_id if chain_id is not None else 'id:?'
+            return '%s/%s %s %s' % (row.get('alias'), row.get('chain'), id_part, row.get('status'))
+        waiting = payload.get('waiting_chains') or []
+        ready = payload.get('ready_chains') or []
+        if waiting:
+            detail = 'waiting: ' + ', '.join(describe(row) for row in waiting)
+        else:
+            detail = 'all aux chains ready'
+        return '%d/%d ready; %s' % (
+            payload.get('ready_count', len(ready)),
+            payload.get('total_chains', len(ready) + len(waiting)),
+            detail,
+        )
     
     def merkle_branch(self, chain_index, merkle_tree):
         """Calculate merkle branch for a chain"""
@@ -901,6 +969,12 @@ class Listener(Server):
             'merkle_root': merkle_root,
             'payout_addresses': list(payout_addresses),
         }
+        readiness_payload = self._aux_readiness_payload()
+        result.update(readiness_payload)
+        if readiness_payload['ready_count'] <= 0 and readiness_payload['total_chains'] > 0:
+            result['error'] = 'aux chains not ready'
+        elif readiness_payload['ready_count'] < readiness_payload['total_chains']:
+            result['warning'] = 'partial aux readiness'
         if self.rewrite_target:
             result['aux_target'] = self.rewrite_target
         else:
@@ -921,8 +995,12 @@ class Listener(Server):
 
     def update_aux_process(self):
         """Periodic aux update"""
-        reactor.callLater(AUX_UPDATE_INTERVAL, self.update_aux_process)
-        self.update_auxs()
+        def schedule_next(result):
+            if hasattr(result, 'getErrorMessage'):
+                logger.error("Aux update failed: %s", result.getErrorMessage())
+            reactor.callLater(AUX_UPDATE_INTERVAL, self.update_aux_process)
+            return None
+        defer.maybeDeferred(self.update_auxs).addBoth(schedule_next)
 
     @defer.inlineCallbacks
     def rpc_getaux(self, data=None):
@@ -942,8 +1020,14 @@ class Listener(Server):
 
             # Check if merkle tree queue has data
             if not self.merkle_tree_queue:
-                logger.warning("rpc_getaux: Merkle tree queue is empty")
-                defer.returnValue({'aux': '00' * 40 + ("%02x000000" % self.merkle_size) + "00000000", 'error': 'aux chains not ready'})
+                readiness_payload = self._aux_readiness_payload()
+                logger.warning("rpc_getaux: aux chains not ready (%s)", self._format_aux_readiness(readiness_payload))
+                result = {
+                    'aux': '00' * 40 + ("%02x000000" % self.merkle_size) + "00000000",
+                    'error': 'aux chains not ready',
+                }
+                result.update(readiness_payload)
+                defer.returnValue(result)
                 return
 
             merkle_root = self.merkle_tree_queue[-1]
@@ -1198,7 +1282,7 @@ def main(args):
     # Bind to IPv4 only - change '0.0.0.0' to listen on all interfaces
     from twisted.internet import endpoints
     endpoint = endpoints.TCP4ServerEndpoint(reactor, args.worker_port, interface='127.0.0.1')
-    endpoint.listen(server.Site(listener))
+    endpoint.listen(server.Site(listener)).addCallback(lambda _port: listener.update_aux_process())
 
 def run():
     parser = argparse.ArgumentParser(description='merge-mine-proxy (version %s)' % (__version__,))

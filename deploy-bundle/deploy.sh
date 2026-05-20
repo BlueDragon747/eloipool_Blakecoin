@@ -177,6 +177,31 @@ remote_cli_command() {
     printf '%s' "$cmd"
 }
 
+generate_remote_aux_address() {
+    local label="$1"
+    local cli="$2"
+    local conf="$3"
+    local out=""
+    local rc=0
+
+    if out="$(run_ssh "$(remote_cli_command "$cli" "$conf" getnewaddress pool-aux bech32)" 2>&1)"; then
+        printf '%s\n' "$out"
+        return 0
+    else
+        rc=$?
+    fi
+
+    if printf '%s\n' "$out" | grep -Eiq 'bech32|address type|segwit'; then
+        echo "WARNING: ${label} rejected bech32 pool-aux address; falling back to legacy" >&2
+        out="$(run_ssh "$(remote_cli_command "$cli" "$conf" getnewaddress pool-aux legacy)" 2>&1)"
+        printf '%s\n' "$out"
+        return
+    fi
+
+    printf '%s\n' "$out" >&2
+    return "$rc"
+}
+
 write_env_line() {
     local file="$1"
     local key="$2"
@@ -434,31 +459,31 @@ require_nonempty "TRACKER_ADDR" "$TRACKER_ADDR"
 if [ -z "$POOL_AUX_ADDRESS_BBTC" ]; then
     say "Generating BlakeBitcoin pooled aux payout address"
     POOL_AUX_ADDRESS_BBTC="$(
-        run_ssh "$(remote_cli_command "$BBTC_CLI_BIN_REMOTE" "$BBTC_RPC_CONF_REMOTE" getnewaddress pool-aux bech32)"
+        generate_remote_aux_address "BlakeBitcoin" "$BBTC_CLI_BIN_REMOTE" "$BBTC_RPC_CONF_REMOTE"
     )"
 fi
 if [ -z "$POOL_AUX_ADDRESS_ELT" ]; then
     say "Generating Electron pooled aux payout address"
     POOL_AUX_ADDRESS_ELT="$(
-        run_ssh "$(remote_cli_command "$ELT_CLI_BIN_REMOTE" "$ELT_RPC_CONF_REMOTE" getnewaddress pool-aux bech32)"
+        generate_remote_aux_address "Electron" "$ELT_CLI_BIN_REMOTE" "$ELT_RPC_CONF_REMOTE"
     )"
 fi
 if [ -z "$POOL_AUX_ADDRESS_LIT" ]; then
     say "Generating Lithium pooled aux payout address"
     POOL_AUX_ADDRESS_LIT="$(
-        run_ssh "$(remote_cli_command "$LIT_CLI_BIN_REMOTE" "$LIT_RPC_CONF_REMOTE" getnewaddress pool-aux bech32)"
+        generate_remote_aux_address "Lithium" "$LIT_CLI_BIN_REMOTE" "$LIT_RPC_CONF_REMOTE"
     )"
 fi
 if [ -z "$POOL_AUX_ADDRESS_PHO" ]; then
     say "Generating Photon pooled aux payout address"
     POOL_AUX_ADDRESS_PHO="$(
-        run_ssh "$(remote_cli_command "$PHO_CLI_BIN_REMOTE" "$PHO_RPC_CONF_REMOTE" getnewaddress pool-aux bech32)"
+        generate_remote_aux_address "Photon" "$PHO_CLI_BIN_REMOTE" "$PHO_RPC_CONF_REMOTE"
     )"
 fi
 if [ -z "$POOL_AUX_ADDRESS_UMO" ]; then
     say "Generating UniversalMolecule pooled aux payout address"
     POOL_AUX_ADDRESS_UMO="$(
-        run_ssh "$(remote_cli_command "$UMO_CLI_BIN_REMOTE" "$UMO_RPC_CONF_REMOTE" getnewaddress pool-aux bech32)"
+        generate_remote_aux_address "UniversalMolecule" "$UMO_CLI_BIN_REMOTE" "$UMO_RPC_CONF_REMOTE"
     )"
 fi
 
@@ -632,6 +657,7 @@ say "Writing ${INSTALL_ROOT}/config/proxy.env"
 PROXY_ENV_TMP="$TMPDIR/proxy.env"
 : > "$PROXY_ENV_TMP"
 write_env_line "$PROXY_ENV_TMP" PROXY_ARGS "$PROXY_ARGS"
+write_env_line "$PROXY_ENV_TMP" PROXY_PORT "$PROXY_PORT"
 run_scp "$PROXY_ENV_TMP" "${USER}@${HOST}:${INSTALL_ROOT}/config/proxy.env"
 run_ssh "chown ${POOL_USER}:${POOL_GROUP} ${INSTALL_ROOT}/config/proxy.env && chmod 600 ${INSTALL_ROOT}/config/proxy.env"
 

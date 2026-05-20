@@ -158,6 +158,22 @@ the network tip, gracefully stops that daemon, then moves to the next coin.
 After all six are synced and stopped, it starts the final daemons one coin at a
 time, then starts the pool, proxy, and dashboard.
 
+During final startup, the installer temporarily gates the public stratum port
+with a firewall rule. This prevents miners from submitting shares before the
+merged-mining proxy has a usable aux template. The gate is removed only after
+the pool JSON-RPC is live, the proxy port is bound, and the proxy answers
+`getaux` with either a positive aux-chain readiness count or a usable aux blob.
+If deploy fails before that readiness point, public stratum remains gated so
+operators do not get confusing `gotwork` failures from a half-started pool.
+
+The runtime has the same protection after startup through
+`RequireGotworkReady = True`. Before accepting each stratum share, Eloipool
+asks the proxy for a per-miner aux template. If the proxy has no usable aux
+template, the share is rejected as `gotwork-unavailable` and the operator log
+explains which proxy/aux readiness condition is missing. If only some aux
+chains are lagging but at least one usable aux template exists, mining
+continues with a partial-readiness warning.
+
 Before deploying, the script scans the target for existing BlakeStream systemd
 units, daemon processes, and Docker containers and prints a summary. Existing
 managed services are stopped gracefully before redeploy. Coin datadirs are
