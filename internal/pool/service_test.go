@@ -1,0 +1,258 @@
+package pool
+
+import (
+	"encoding/json"
+	"errors"
+	"math/big"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/blakecoin/merged-mine-proxy/internal/block"
+)
+
+func TestShouldForwardGotworkUsesAuxTargetGate(t *testing.T) {
+	s := &Service{}
+	s.lastAuxTarget = big.NewInt(100)
+
+	if !s.shouldForwardGotwork(big.NewInt(101), true) {
+		t.Fatal("parent-valid share must always forward to gotwork")
+	}
+	if !s.shouldForwardGotwork(big.NewInt(100), false) {
+		t.Fatal("share at aux target should forward to gotwork")
+	}
+	if s.shouldForwardGotwork(big.NewInt(101), false) {
+		t.Fatal("share above aux target should not forward to gotwork")
+	}
+}
+
+func TestShouldForwardGotworkAllowsUnknownAuxTarget(t *testing.T) {
+	s := &Service{}
+	if !s.shouldForwardGotwork(big.NewInt(101), false) {
+		t.Fatal("unknown aux target should preserve old forwarding behavior")
+	}
+}
+
+func TestParseProxyAuxTargetConvertsEloipoolByteOrder(t *testing.T) {
+	proxyTarget := "0000000000000000000000000000000000000000000000009fee060000000000"
+	canonicalTarget := "000000000006ee9f000000000000000000000000000000000000000000000000"
+
+	got, err := parseProxyAuxTarget(proxyTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := block.TargetFromHex(canonicalTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Cmp(want) != 0 {
+		t.Fatalf("aux target = %064x, want %064x", got, want)
+	}
+
+	direct, err := block.TargetFromHex(proxyTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Cmp(direct) == 0 {
+		t.Fatal("proxy target was parsed without converting Eloipool byte order")
+	}
+
+	s := &Service{lastAuxTarget: got}
+	if !s.shouldForwardGotwork(new(big.Int).Sub(want, big.NewInt(1)), false) {
+		t.Fatal("share below converted aux target should forward to gotwork")
+	}
+	if s.shouldForwardGotwork(new(big.Int).Add(want, big.NewInt(1)), false) {
+		t.Fatal("share above converted aux target should not forward to gotwork")
+	}
+}
+
+func TestDashboardMiningKeyHRPsIncludesAll25AuxChains(t *testing.T) {
+	hrps := dashboardMiningKeyHRPs()
+	for _, label := range []string{"Blakecoin", "BlakeBitcoin", "Electron", "Lithium", "Photon", "UniversalMolecule"} {
+		if hrps[label] == "" {
+			t.Fatalf("expected mining-key HRP for %s", label)
+		}
+	}
+}
+
+func TestDashboardSegwitStatusParsesBIP9AndSoftforkFormats(t *testing.T) {
+	status, active := dashboardSegwitStatus(map[string]interface{}{
+		"bip9_softforks": map[string]interface{}{
+			"segwit": map[string]interface{}{"status": "started"},
+		},
+	})
+	if status != "started" || active {
+		t.Fatalf("started status = %q active=%v", status, active)
+	}
+	status, active = dashboardSegwitStatus(map[string]interface{}{
+		"softforks": map[string]interface{}{
+			"segwit": map[string]interface{}{"active": true},
+		},
+	})
+	if status != "active" || !active {
+		t.Fatalf("active status = %q active=%v", status, active)
+	}
+}
+
+func TestParseBaseDifficulty(t *testing.T) {
+	cfg, err := Parse([]string{"--start-proxy=false", "--base-difficulty", "32"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BaseDifficulty != 32 {
+		t.Fatalf("base difficulty = %d", cfg.BaseDifficulty)
+	}
+	if _, err := Parse([]string{"--start-proxy=false", "--base-difficulty", "0"}); err == nil {
+		t.Fatal("expected invalid zero base difficulty")
+	}
+}
+
+func TestParentSubmitStatusReflectsDaemonResult(t *testing.T) {
+	accepted, status := parentSubmitStatus(json.RawMessage("null"), nil)
+	if !accepted || status != "parent-accepted" {
+		t.Fatalf("null submit result = %v %s", accepted, status)
+	}
+	accepted, status = parentSubmitStatus(json.RawMessage(`"bad-txn"`), nil)
+	if accepted || status != "parent-rejected" {
+		t.Fatalf("rejection result = %v %s", accepted, status)
+	}
+	accepted, status = parentSubmitStatus(nil, errors.New("connection refused"))
+	if accepted || status != "parent-submit-failed" {
+		t.Fatalf("error result = %v %s", accepted, status)
+	}
+}
+
+func TestCachedAuxGrace(t *testing.T) {
+	s := &Service{}
+	if _, ok := s.cachedAux(recentAuxGrace); ok {
+		t.Fatal("empty aux cache should not be usable")
+	}
+	s.lastAux = "fabe6d6d00"
+	s.lastAuxAt = time.Now()
+	if aux, ok := s.cachedAux(recentAuxGrace); !ok || aux != "fabe6d6d00" {
+		t.Fatalf("fresh cached aux = %q %v", aux, ok)
+	}
+	s.lastAuxAt = time.Now().Add(-recentAuxGrace - time.Second)
+	if _, ok := s.cachedAux(recentAuxGrace); ok {
+		t.Fatal("stale aux cache should not be usable")
+	}
+}
+
+func TestParseSolveStatusLogLine(t *testing.T) {
+	line := `time=2026-05-22T14:34:26.945Z level=INFO msg=2026-05-22T14:34:26.945263,solve_status,parent-accepted,1,1,1,1,1,766a3730403adc074091b6e8edf7c163ebbe9ef950b358e6ee87000000000000`
+	event, ok := parseSolveStatusLogLine(line)
+	if !ok {
+		t.Fatal("expected solve_status line to parse")
+	}
+	if !event.ParentValid || event.ParentStatus != "parent-accepted" {
+		t.Fatalf("parent status = %q valid=%v", event.ParentStatus, event.ParentValid)
+	}
+	if event.AcceptedCount != 6 || event.RejectedCount != 0 {
+		t.Fatalf("accepted/rejected = %d/%d", event.AcceptedCount, event.RejectedCount)
+	}
+	if len(event.Chains) != 6 || event.Chains[1].Ticker != "BBTC" || !event.Chains[5].Accepted {
+		t.Fatalf("chains = %#v", event.Chains)
+	}
+	if event.Time != "2026-05-22T14:34:26Z" {
+		t.Fatalf("time = %s", event.Time)
+	}
+}
+
+func TestParseStructuredSolveLogLineWithUsername(t *testing.T) {
+	line := `time=2026-05-22T14:34:26.945Z level=INFO msg=solve username=99d7e50d8652fbcd0da10dadee65d37e9d358b3b.rig1 parent_status=parent-rejected aux_flags=1,0,1,0,1 parent_hash=766a3730403adc074091b6e8edf7c163ebbe9ef950b358e6ee87000000000000`
+	event, ok := parseSolveStatusLogLine(line)
+	if !ok {
+		t.Fatal("expected structured solve line to parse")
+	}
+	if event.Username != "99d7e50d8652fbcd0da10dadee65d37e9d358b3b.rig1" {
+		t.Fatalf("username = %q", event.Username)
+	}
+	if event.AcceptedCount != 3 || event.RejectedCount != 3 {
+		t.Fatalf("accepted/rejected = %d/%d", event.AcceptedCount, event.RejectedCount)
+	}
+}
+
+func TestTailSolveEventsBackfillsUsernameFromGotworkDebug(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "go-pool.log")
+	username := "99d7e50d8652fbcd0da10dadee65d37e9d358b3b.rig2"
+	hash := "2106a90181ebb596f66edd8335d8e1ca818f454a5b8cec4c3935100000000000"
+	logs := strings.Join([]string{
+		`time=2026-05-22T14:34:26.900Z level=INFO msg="gotwork payload debug" username=` + username + ` pow_hash=` + hash + ` parent_status=parent-rejected`,
+		`time=2026-05-22T14:34:26.945Z level=INFO msg=2026-05-22T14:34:26.945263,solve_status,parent-rejected,1,0,1,0,1,` + hash,
+	}, "\n")
+	if err := os.WriteFile(path, []byte(logs), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	events := tailSolveEventsFromPoolLog(path, 10)
+	if len(events) != 1 {
+		t.Fatalf("events = %d", len(events))
+	}
+	if events[0].Username != username {
+		t.Fatalf("username = %q", events[0].Username)
+	}
+}
+
+func TestMergeDashboardSolveEventsPrefersLiveEvents(t *testing.T) {
+	fallback := []dashboardSolveEvent{{
+		Unix:       10,
+		ParentHash: "abc",
+		Username:   "99d7e50d8652fbcd0da10dadee65d37e9d358b3b.rig1",
+	}}
+	live := []interface{}{
+		map[string]interface{}{
+			"unix":        float64(10),
+			"parent_hash": "abc",
+		},
+	}
+	events := mergeDashboardSolveEvents(live, fallback)
+	if len(events) != 1 {
+		t.Fatalf("events = %d", len(events))
+	}
+	event, ok := events[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected live map event, got %T", events[0])
+	}
+	if event["username"] == "" {
+		t.Fatalf("fallback username was not merged into live event: %#v", event)
+	}
+}
+
+func TestDashboardMinerPayoutTotalsAggregateByMiningKey(t *testing.T) {
+	key := "99d7e50d8652fbcd0da10dadee65d37e9d358b3b"
+	events := []interface{}{
+		map[string]interface{}{
+			"username": key + ".rig1",
+			"chains": []interface{}{
+				map[string]interface{}{"label": "Blakecoin", "ticker": "BLC", "accepted": true},
+				map[string]interface{}{"label": "Electron", "ticker": "ELT", "accepted": true},
+				map[string]interface{}{"label": "Photon", "ticker": "PHO", "accepted": false},
+			},
+		},
+		map[string]interface{}{
+			"username": key + ".rig2",
+			"chains": []interface{}{
+				map[string]interface{}{"label": "Blakecoin", "ticker": "BLC", "accepted": true},
+			},
+		},
+	}
+	chains := []dashboardChain{
+		{Label: "Blakecoin", Blocks: 1980000},
+		{Label: "Electron", Blocks: 6200000},
+	}
+	payouts := dashboardMinerPayoutTotals(events, chains)[key]
+	if len(payouts) == 0 {
+		t.Fatal("expected payout rows")
+	}
+	byTicker := map[string]dashboardMinerPayout{}
+	for _, payout := range payouts {
+		byTicker[payout.Ticker] = payout
+	}
+	if byTicker["BLC"].Blocks != 2 || byTicker["BLC"].Amount != "100.00000000" {
+		t.Fatalf("BLC payout = %#v", byTicker["BLC"])
+	}
+	if byTicker["ELT"].Blocks != 1 || byTicker["ELT"].Amount != "5.00000000" {
+		t.Fatalf("ELT payout = %#v", byTicker["ELT"])
+	}
+}
