@@ -159,6 +159,12 @@ button.primary {
   background: var(--green);
 }
 
+.endpoint button.copy-failed {
+  border-color: var(--red);
+  background: var(--red-soft);
+  color: var(--red);
+}
+
 main {
   max-width: 1280px;
   margin: 0 auto;
@@ -623,6 +629,18 @@ pre {
 .mkgen-result .copy-btn:hover {
   border-color: var(--blue);
   background: var(--blue-soft);
+}
+
+.mkgen-result .copy-btn.copied,
+.copy-id.copied {
+  border-color: var(--green);
+  color: var(--green);
+}
+
+.mkgen-result .copy-btn.copy-failed,
+.copy-id.copy-failed {
+  border-color: var(--red);
+  color: var(--red);
 }
 
 .count {

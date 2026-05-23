@@ -12,7 +12,44 @@ function chainByName(name){return (lastState?.chains||[]).find(c=>c.label===name
 function chainByTicker(t){return (lastState?.chains||[]).find(c=>c.ticker===t)||{}}
 function ticker(label){return (lastState?.chain_tickers||{})[label]||label}
 function currentMkgenWorker(){return (mkgenWorker||'rig1').trim()||'rig1'}
-async function copyText(v){await navigator.clipboard.writeText(v)}
+function fallbackCopyText(v){
+  const el=document.createElement('textarea');
+  el.value=String(v??'');
+  el.setAttribute('readonly','');
+  el.style.position='fixed';
+  el.style.left='-9999px';
+  el.style.top='0';
+  document.body.appendChild(el);
+  el.focus();
+  el.select();
+  el.setSelectionRange(0,el.value.length);
+  let ok=false;
+  try{ok=document.execCommand('copy')}finally{document.body.removeChild(el)}
+  if(!ok) throw new Error('copy command failed');
+}
+function copyFeedback(btn,ok){
+  if(!btn) return;
+  const old=btn.dataset.copyLabel||btn.textContent;
+  btn.dataset.copyLabel=old;
+  btn.textContent=ok?'copied':'copy failed';
+  btn.classList.toggle('copied',ok);
+  btn.classList.toggle('copy-failed',!ok);
+  setTimeout(()=>{btn.textContent=old; btn.classList.remove('copied','copy-failed')},1000);
+}
+async function copyText(v,btn){
+  const text=String(v??'');
+  if(!text){copyFeedback(btn,false); return false}
+  try{
+    if(window.isSecureContext&&navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
+    else fallbackCopyText(text);
+    copyFeedback(btn,true);
+    return true;
+  }catch(e){
+    try{fallbackCopyText(text); copyFeedback(btn,true); return true}
+    catch(err){console.warn('copy failed',err); copyFeedback(btn,false); return false}
+  }
+}
+function bindCopyButtons(){document.querySelectorAll('[data-copy]').forEach(b=>b.onclick=()=>copyText(b.dataset.copy,b))}
 function solveEvents(){return (lastState?.recent_solves||lastState?.proxy?.recent_solves||[])}
 function stateClass(state){return state==='mining'?'good':state==='idle'?'blue':'warn'}
 function chainSyncLabel(c){
@@ -128,7 +165,7 @@ function renderMiners(){
       + '</dl><dl><dt>accepted shares</dt><dd>'+esc(m.accepted_shares||m.shares||0)+' counted toward payout / round contribution</dd><dt>blocks solved</dt><dd><b class="good">'+esc(solvedBlocks)+'</b> across all chains</dd><dt>all payouts</dt><dd><div class="payout-list">'+payoutRows(m)+'</div></dd></dl></div></div></details>'
   }).join('')+'</div>';
   restoreOpen('.id-row','data-row-key',openRows);
-  document.querySelectorAll('[data-copy]').forEach(b=>b.onclick=()=>copyText(b.dataset.copy));
+  bindCopyButtons();
 }
 function renderSolvedBlocks(){
   const rows=solveEvents().slice().reverse();
@@ -172,11 +209,11 @@ function renderMkgen(){
       + '</div></div></div></div>';
   }
   const gen=$('genKey'); if(gen) gen.onclick=async()=>{const r=await fetch('/api/generate-mining-key',{method:'POST'}).then(r=>r.json()); if(r.ok){lastKey=r.bundle; renderMkgen()}};
-  const cu=$('copyUser'); if(cu&&lastKey) cu.onclick=()=>copyText(lastKey.mining_key+'.'+currentMkgenWorker());
+  const cu=$('copyUser'); if(cu&&lastKey) cu.onclick=()=>copyText(lastKey.mining_key+'.'+currentMkgenWorker(),cu);
   const sk=$('saveKey'); if(sk&&lastKey) sk.onclick=()=>{const lines=['Private key for wallets: '+lastKey.private_key,'Public key: '+lastKey.public_key,'Mining key payload: '+lastKey.mining_key,'Stratum username for miner: '+lastKey.mining_key+'.'+currentMkgenWorker(),'','Derived payout addresses:']; const entries=orderedAddressEntries(lastKey.derived_addresses||{}); for(const [label,d] of entries) lines.push('- '+label+' ['+d.hrp+']: '+d.address); if(!entries.some(([label,d])=>ticker(label)==='BBTC'||d.hrp==='bbtc')&&!chainByTicker('BBTC').segwit_active) lines.push('- BlakeBitcoin [BBTC]: legacy pool fallback until SegWit activation'); const blob=new Blob([lines.join('\n')+'\n'],{type:'text/plain'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='mining_keys.txt'; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000)};
   const worker=$('mkgenWorker'), workerName=$('mkgenWorkerName'); if(worker&&workerName) worker.oninput=()=>{mkgenWorker=worker.value.trim()||'rig1'; workerName.textContent=currentMkgenWorker()};
-  const cc=$('copyCmd'); if(cc&&lastKey) cc.onclick=()=>{const st=lastState?.stratum||{}; copyText('cgminer -o stratum+tcp://'+(st.host||location.hostname)+':'+(st.port||3334)+' -u '+lastKey.mining_key+'.'+currentMkgenWorker()+' -p x')};
-  document.querySelectorAll('[data-copy]').forEach(b=>b.onclick=()=>copyText(b.dataset.copy));
+  const cc=$('copyCmd'); if(cc&&lastKey) cc.onclick=()=>{const st=lastState?.stratum||{}; copyText('cgminer -o stratum+tcp://'+(st.host||location.hostname)+':'+(st.port||3334)+' -u '+lastKey.mining_key+'.'+currentMkgenWorker()+' -p x',cc)};
+  bindCopyButtons();
 }
 function orderedAddressEntries(addrs){
   const order=lastState?.chain_order||Object.keys(addrs||{});
@@ -201,7 +238,7 @@ async function refresh(){
   await refreshLastKeyAddresses();
   const st=lastState.stratum||{}, stratumUrl='stratum+tcp://'+(st.host||location.hostname)+':'+(st.port||3334);
   $('stratumUrl').textContent=stratumUrl;
-  $('copyStratum').onclick=async()=>{await copyText(stratumUrl); $('copyStratum').textContent='copied'; $('copyStratum').classList.add('copied'); setTimeout(()=>{$('copyStratum').textContent='copy'; $('copyStratum').classList.remove('copied')},900)};
+  $('copyStratum').onclick=()=>copyText(stratumUrl,$('copyStratum'));
   renderMineHelp(); renderChains(); renderPool(); renderPayouts(); renderMiners(); renderSolvedBlocks(); renderShares(); renderPoolLog(); renderMkgen();
 }
 refresh(); setInterval(refresh,5000);
