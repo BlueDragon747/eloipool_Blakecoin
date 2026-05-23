@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"math/big"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -170,16 +173,50 @@ func TestParseSolveStatusLogLine(t *testing.T) {
 	}
 }
 
+func TestParseStructuredSolveLogLineWithUsername(t *testing.T) {
+	line := `time=2026-05-22T14:34:26.945Z level=INFO msg=solve username=99d7e50d8652fbcd0da10dadee65d37e9d358b3b.rig1 parent_status=parent-rejected aux_flags=1,0,1,0,1 parent_hash=766a3730403adc074091b6e8edf7c163ebbe9ef950b358e6ee87000000000000`
+	event, ok := parseSolveStatusLogLine(line)
+	if !ok {
+		t.Fatal("expected structured solve line to parse")
+	}
+	if event.Username != "99d7e50d8652fbcd0da10dadee65d37e9d358b3b.rig1" {
+		t.Fatalf("username = %q", event.Username)
+	}
+	if event.AcceptedCount != 3 || event.RejectedCount != 3 {
+		t.Fatalf("accepted/rejected = %d/%d", event.AcceptedCount, event.RejectedCount)
+	}
+}
+
+func TestTailSolveEventsBackfillsUsernameFromGotworkDebug(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "go-pool.log")
+	username := "99d7e50d8652fbcd0da10dadee65d37e9d358b3b.rig2"
+	hash := "2106a90181ebb596f66edd8335d8e1ca818f454a5b8cec4c3935100000000000"
+	logs := strings.Join([]string{
+		`time=2026-05-22T14:34:26.900Z level=INFO msg="gotwork payload debug" username=` + username + ` pow_hash=` + hash + ` parent_status=parent-rejected`,
+		`time=2026-05-22T14:34:26.945Z level=INFO msg=2026-05-22T14:34:26.945263,solve_status,parent-rejected,1,0,1,0,1,` + hash,
+	}, "\n")
+	if err := os.WriteFile(path, []byte(logs), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	events := tailSolveEventsFromPoolLog(path, 10)
+	if len(events) != 1 {
+		t.Fatalf("events = %d", len(events))
+	}
+	if events[0].Username != username {
+		t.Fatalf("username = %q", events[0].Username)
+	}
+}
+
 func TestMergeDashboardSolveEventsPrefersLiveEvents(t *testing.T) {
 	fallback := []dashboardSolveEvent{{
 		Unix:       10,
 		ParentHash: "abc",
+		Username:   "99d7e50d8652fbcd0da10dadee65d37e9d358b3b.rig1",
 	}}
 	live := []interface{}{
 		map[string]interface{}{
 			"unix":        float64(10),
 			"parent_hash": "abc",
-			"username":    "99d7e50d8652fbcd0da10dadee65d37e9d358b3b.rig1",
 		},
 	}
 	events := mergeDashboardSolveEvents(live, fallback)
@@ -191,7 +228,7 @@ func TestMergeDashboardSolveEventsPrefersLiveEvents(t *testing.T) {
 		t.Fatalf("expected live map event, got %T", events[0])
 	}
 	if event["username"] == "" {
-		t.Fatalf("live event username was not preserved: %#v", event)
+		t.Fatalf("fallback username was not merged into live event: %#v", event)
 	}
 }
 

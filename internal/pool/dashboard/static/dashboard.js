@@ -35,6 +35,14 @@ function solveTotals(){
   }
   return totals;
 }
+function recentAuxWin(maxAgeSec=3600){
+  const now=Date.now();
+  return solveEvents().some(ev=>{
+    const ts=Date.parse(ev.time||'');
+    if(!Number.isFinite(ts) || Math.floor((now-ts)/1000)>maxAgeSec) return false;
+    return (ev.chains||[]).some(c=>c.accepted&&(c.ticker||c.alias||c.label)!=='BLC');
+  });
+}
 function renderMineHelp(){
   const st=lastState?.stratum||{}, url='stratum+tcp://'+(st.host||location.hostname)+':'+(st.port||3334);
   $('mineHelp').innerHTML='<div class="two"><div class="box"><pre>BAIKAL GIANT-B ASIC\n\nPOOL URL    '+esc(url)+'\nALGORITHM   Blake256r8\nUSER        miningkey.worker\nPASS        x\nEXTRANONCE  DISABLE  (uncheck the Extranonce box)</pre></div><div class="box"><pre>GPU MINING\n\nCGMINER\ncgminer --blake256 -o '+esc(url)+' -u miningkey.worker -p x\n\nSGMINER\nsgminer --no-submit-stale --kernel blakecoin --gpu-platform 0 -I 30 --no-extranonce \\\n  -o '+esc(url)+' -u miningkey.worker -p x</pre></div></div><p class="muted"><b class="blue">User:</b> use your generated mining key. Add <span class="mono">.worker</span> if you want a worker label.</p>';
@@ -52,17 +60,17 @@ function renderChains(){
 function renderPool(){
   const p=lastState?.pool||{}, x=lastState?.proxy||{}, sub=x.submissions||{}, state=lastState?.status?.state||'starting';
   const ready=(x.ready_count??0)+' / '+(x.total_chains??0);
-  const lastSolve=solveEvents().slice(-1)[0];
   const wins=solveTotals();
   const recentWins=wins.parent+' BLC / '+wins.aux+' aux';
   $('poolStats').innerHTML=[
     stat('Status',state,stateClass(state)), stat('Merged Wins',recentWins,wins.parent||wins.aux?'good':'muted'), stat('Miners',p.miners||0),
     stat('Accepted',p.accepted||0,'good'), stat('Rejected',p.rejected||0,Number(p.rejected)>0?'bad':''), stat('Aux RPC',ready,x.ready_count===x.total_chains?'good':'warn'),
     stat('Gotwork',p.gotwork_sent||0,'blue'), stat('Skipped',p.gotwork_skipped||0,'muted'), stat('Aux Accepted',wins.aux,wins.aux?'good':'')
-  ].join('')+(lastSolve?'<div class="box pool-last-solved" style="grid-column:1/-1"><span class="label">Last solved - '+esc(ageTime(lastSolve.time))+'</span><div class="pool-last-solved-chips">'+renderOutcomeChips(lastSolve.chains)+'</div></div>':'');
-  const warning=Number(sub.attempts)>0&&Number(sub.accepted)===0&&Number(sub.stale)>0;
+  ].join('');
+  const attempts=Number(sub.attempts||0), accepted=Number(sub.accepted||0), stale=Number(sub.stale||0), failed=Number(sub.failed||0);
+  const warning=attempts>=12&&accepted===0&&(failed>0||stale>0)&&!recentAuxWin();
   const notice=$('notice'); notice.className='notice'+(warning?' show':'');
-  notice.textContent=warning?'Aux submit warning: miner shares are accepted, but aux submissions are stale/not accepted. Review gotwork debug before production use.':'';
+  notice.textContent=warning?'Aux submit warning: repeated gotwork submits have not produced a recent aux accept. Review gotwork debug before production use.':'';
 }
 function renderPayouts(){
   const rows=lastState?.chains||[];
@@ -126,27 +134,16 @@ function renderSolvedBlocks(){
   const rows=solveEvents().slice().reverse();
   $('solveCount').textContent=rows.length;
   const latest=rows[0];
-  $('solveLatest').innerHTML=latest?'latest: <span class="mono">'+esc(shortHash(latest.parent_hash,18))+'</span> <span>'+ageTime(latest.time)+'</span> '+renderOutcomeChips((latest.chains||[]).filter(c=>c.accepted)):'';
+  $('solveLatest').innerHTML=latest?'latest: <span class="mono latest-hash">'+esc(latest.parent_hash||'')+'</span> <span>'+ageTime(latest.time)+'</span> '+renderOutcomeChips(latest.chains||[]):'';
   if(!rows.length){$('solvedBlocks').innerHTML='<div class="empty">no block candidates recorded yet — accepted/rejected chain chips appear here when a share reaches a parent or aux target</div>'; return}
-  $('solvedBlocks').innerHTML='<table class="recent-table solved-table solved-blocks-table"><thead><tr><th class="age-col">age</th><th class="hash-col">parent hash</th><th class="chains-col">chains</th><th class="count-col">accepted</th><th class="count-col">rejected</th></tr></thead><tbody>'+rows.map(ev=>'<tr><td class="age-col">'+ageTime(ev.time)+'</td><td class="hash hash-col mono" title="'+esc(ev.parent_hash)+'">'+esc(ev.parent_hash)+'</td><td class="chains-col">'+renderOutcomeChips(ev.chains)+'</td><td class="count-col good">'+esc(ev.accepted_count||0)+'</td><td class="count-col '+((ev.rejected_count||0)>0?'bad':'muted')+'">'+esc(ev.rejected_count||0)+'</td></tr>').join('')+'</tbody></table>';
-}
-function renderSolvedShares(){
-  const rows=solveEvents().slice().reverse();
-  $('solvedShareCount').textContent=rows.length;
-  if(!rows.length){$('solvedShares').innerHTML='<div class="empty">no solved shares yet — block-winning shares will appear here</div>'; return}
-  const hasIdentity=rows.some(ev=>Boolean(ev.username));
-  if(!hasIdentity){
-    $('solvedShares').innerHTML='<table class="recent-table solved-table solved-shares-table"><thead><tr><th class="age-col">age</th><th class="hash-col">parent hash</th><th class="chains-col">chains solved</th><th class="count-col">accepted</th><th class="count-col">rejected</th></tr></thead><tbody>'+rows.map(ev=>'<tr><td class="age-col">'+ageTime(ev.time)+'</td><td class="hash hash-col mono" title="'+esc(ev.parent_hash)+'">'+esc(ev.parent_hash)+'</td><td class="chains-col">'+renderOutcomeChips(ev.chains)+'</td><td class="count-col good">'+esc(ev.accepted_count||0)+'</td><td class="count-col '+((ev.rejected_count||0)>0?'bad':'muted')+'">'+esc(ev.rejected_count||0)+'</td></tr>').join('')+'</tbody></table>';
-    return;
-  }
-  $('solvedShares').innerHTML='<table class="recent-table solved-table solved-shares-table"><thead><tr><th class="age-col">age</th><th class="hash-col">parent hash</th><th>miner</th><th>worker</th><th>type</th><th class="chains-col">chains solved</th></tr></thead><tbody>'+rows.map(ev=>{const id=parseUserDisplay(ev.username||''); const known=Boolean(ev.username); return '<tr><td class="age-col">'+ageTime(ev.time)+'</td><td class="hash hash-col mono" title="'+esc(ev.parent_hash)+'">'+esc(ev.parent_hash)+'</td><td class="mono">'+(known?esc(id.key):'<span class="muted">not recorded</span>')+'</td><td>'+esc(known?(id.worker||'—'):'—')+'</td><td>'+(known?renderAddrType(id.type):'<span class="muted">—</span>')+'</td><td class="chains-col">'+renderOutcomeChips(ev.chains)+'</td></tr>'}).join('')+'</tbody></table>';
+  $('solvedBlocks').innerHTML='<table class="recent-table solved-table solved-blocks-table"><thead><tr><th class="age-col">age</th><th class="miner-col">miner</th><th class="type-col">type</th><th class="chains-col">chains</th><th class="count-col">accepted</th><th class="count-col">rejected</th></tr></thead><tbody>'+rows.map(ev=>{const id=parseUserDisplay(ev.username||''); const known=Boolean(ev.username); return '<tr><td class="age-col">'+ageTime(ev.time)+'</td><td class="miner-col mono">'+(known?esc(ev.username):'<span class="muted">—</span>')+'</td><td class="type-col">'+(known?renderAddrType(id.type):'<span class="muted">—</span>')+'</td><td class="chains-col">'+renderOutcomeChips(ev.chains)+'</td><td class="count-col good">'+esc(ev.accepted_count||0)+'</td><td class="count-col '+((ev.rejected_count||0)>0?'bad':'muted')+'">'+esc(ev.rejected_count||0)+'</td></tr>'}).join('')+'</tbody></table>';
 }
 function parseUserDisplay(u){let key=u,worker=''; const p=String(u||'').lastIndexOf('.'); if(p>0){key=u.slice(0,p); worker=u.slice(p+1)} let type='none'; if(/^[0-9a-fA-F]{40}$/.test(key))type='bech32'; else if(/^[a-z]+1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+$/.test(key))type='bech32'; else if(/^[13q][123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]{25,61}$/.test(key))type=key[0]==='3'||key[0]==='q'?'p2sh':'legacy'; return {key,worker,type}}
 function renderShares(){
   const shares=(lastState?.recent_shares||[]).slice().reverse();
   const shareCount=$('shareCount');
   if(shareCount) shareCount.textContent=shares.length;
-  $('shares').innerHTML=shares.length?shares.map(s=>{const chips=s.parent_valid?renderOutcomeChips([{label:'Blakecoin',ticker:'BLC',attempted:true,accepted:true}]):'<span class="muted">share only</span>'; return '<tr><td>'+ageTime(s.time)+'</td><td>'+esc(s.username)+'</td><td>'+esc(s.worker||'—')+'</td><td>'+renderAddrType(s.addr_type||'none')+'</td><td class="hash mono">'+esc(s.hash)+'</td><td>'+chips+'</td></tr>'}).join(''):'<tr><td colspan="6">No shares yet</td></tr>';
+  $('shares').innerHTML=shares.length?shares.map(s=>'<tr><td>'+ageTime(s.time)+'</td><td>'+esc(s.username)+'</td><td>'+esc(s.worker||'—')+'</td><td>'+renderAddrType(s.addr_type||'none')+'</td><td class="share-hash mono">'+esc(s.hash)+'</td></tr>').join(''):'<tr><td colspan="5">No shares yet</td></tr>';
 }
 function renderPoolLog(){
   const lines=lastState?.pool_log||[];
@@ -205,6 +202,6 @@ async function refresh(){
   const st=lastState.stratum||{}, stratumUrl='stratum+tcp://'+(st.host||location.hostname)+':'+(st.port||3334);
   $('stratumUrl').textContent=stratumUrl;
   $('copyStratum').onclick=async()=>{await copyText(stratumUrl); $('copyStratum').textContent='copied'; $('copyStratum').classList.add('copied'); setTimeout(()=>{$('copyStratum').textContent='copy'; $('copyStratum').classList.remove('copied')},900)};
-  renderMineHelp(); renderChains(); renderPool(); renderPayouts(); renderMiners(); renderSolvedBlocks(); renderSolvedShares(); renderShares(); renderPoolLog(); renderMkgen();
+  renderMineHelp(); renderChains(); renderPool(); renderPayouts(); renderMiners(); renderSolvedBlocks(); renderShares(); renderPoolLog(); renderMkgen();
 }
 refresh(); setInterval(refresh,5000);

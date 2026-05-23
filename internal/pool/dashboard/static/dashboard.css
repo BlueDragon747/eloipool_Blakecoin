@@ -865,6 +865,11 @@ pre {
   letter-spacing: 0;
 }
 
+.summary-latest .latest-hash {
+  color: var(--text);
+  white-space: nowrap;
+}
+
 .status-pill {
   border: 1px solid var(--line);
   border-radius: 999px;
@@ -976,6 +981,37 @@ pre {
   table-layout: fixed;
 }
 
+.recent-shares-table {
+  table-layout: auto;
+  width: max-content;
+  min-width: 100%;
+}
+
+.recent-shares-table th:nth-child(1),
+.recent-shares-table td:nth-child(1) {
+  width: 86px;
+}
+
+.recent-shares-table th:nth-child(2),
+.recent-shares-table td:nth-child(2) {
+  width: 240px;
+}
+
+.recent-shares-table th:nth-child(3),
+.recent-shares-table td:nth-child(3) {
+  width: 110px;
+}
+
+.recent-shares-table th:nth-child(4),
+.recent-shares-table td:nth-child(4) {
+  width: 120px;
+}
+
+.recent-shares-table .share-hash {
+  min-width: 620px;
+  white-space: nowrap;
+}
+
 .solved-table {
   table-layout: auto;
   min-width: 920px;
@@ -990,21 +1026,21 @@ pre {
   width: 86px;
 }
 
-.solved-table .hash-col {
-  width: 260px;
+.solved-table .miner-col {
+  width: 360px;
+}
+
+.solved-table .type-col {
+  width: 105px;
 }
 
 .solved-table .chains-col {
-  width: 350px;
+  width: 360px;
 }
 
 .solved-table .count-col {
   width: 92px;
   text-align: right;
-}
-
-.solved-table td.hash {
-  max-width: 260px;
 }
 
 .recent-table thead th {

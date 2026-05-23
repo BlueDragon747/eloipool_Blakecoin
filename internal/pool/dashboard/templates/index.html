@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Blakestream Eliopool</title>
-<link rel="stylesheet" href="/dashboard/static/dashboard.css?v=20260522-12">
+<link rel="stylesheet" href="/dashboard/static/dashboard.css?v=20260522-17">
 </head>
 <body>
 <header class="topbar">
@@ -25,11 +25,10 @@
     <details class="card full"><summary><h2>Payouts</h2></summary><div class="body" id="payouts"></div></details>
     <details class="card full"><summary><h2>Connected Miners <span id="minerCount" class="count">0 active · 0 total</span><span class="legend"><span>address type:</span><span class="type-pill bech32">bech32</span><span class="type-pill p2sh">p2sh</span><span class="type-pill legacy">legacy</span></span></h2></summary><div class="body"><div id="miners"></div></div></details>
     <details class="card full"><summary><h2>Recent Solved Blocks <span id="solveCount" class="count">0</span><span id="solveLatest" class="summary-latest"></span></h2></summary><div class="body"><div class="table-scroll recent-shares-scroll" id="solvedBlocks"></div></div></details>
-    <details class="card full"><summary><h2>Recent Solved Shares <span id="solvedShareCount" class="count">0</span></h2></summary><div class="body"><div class="table-scroll recent-shares-scroll" id="solvedShares"></div></div></details>
-    <details class="card full"><summary><h2>Recent Shares <span id="shareCount" class="count">0</span></h2></summary><div class="body"><div class="table-scroll recent-shares-scroll"><table class="recent-table"><thead><tr><th>Age</th><th>Miner</th><th>Worker</th><th>Type</th><th>Hash</th><th>Chains</th></tr></thead><tbody id="shares"></tbody></table></div></div></details>
+    <details class="card full"><summary><h2>Recent Shares <span id="shareCount" class="count">0</span></h2></summary><div class="body"><div class="table-scroll recent-shares-scroll"><table class="recent-table recent-shares-table"><thead><tr><th>Age</th><th>Miner</th><th>Worker</th><th>Type</th><th>Hash</th></tr></thead><tbody id="shares"></tbody></table></div></div></details>
     <details class="card full"><summary><h2>Pool Log <span id="poolLogCount" class="count">0</span></h2></summary><div class="body"><pre id="poolLog" class="log mono"></pre></div></details>
   </div>
 </main>
-<script defer src="/dashboard/static/dashboard.js?v=20260522-12"></script>
+<script defer src="/dashboard/static/dashboard.js?v=20260522-17"></script>
 </body>
 </html>

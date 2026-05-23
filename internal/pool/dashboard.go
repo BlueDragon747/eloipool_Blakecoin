@@ -504,24 +504,27 @@ func tailShares(path string, max int) []dashboardShare {
 
 func mergeDashboardSolveEvents(primary interface{}, fallback []dashboardSolveEvent) []interface{} {
 	events := make([]interface{}, 0, len(fallback)+16)
-	seen := map[string]struct{}{}
+	seen := map[string]int{}
 	for _, event := range interfaceSolveEvents(primary) {
 		key := solveEventKey(event)
 		if key != "" {
 			if _, ok := seen[key]; ok {
 				continue
 			}
-			seen[key] = struct{}{}
+			seen[key] = len(events)
 		}
 		events = append(events, event)
 	}
 	for _, event := range fallback {
 		key := solveEventKey(event)
 		if key != "" {
-			if _, ok := seen[key]; ok {
+			if idx, ok := seen[key]; ok {
+				if solveEventUsername(events[idx]) == "" && event.Username != "" {
+					events[idx] = solveEventWithUsername(events[idx], event.Username)
+				}
 				continue
 			}
-			seen[key] = struct{}{}
+			seen[key] = len(events)
 		}
 		events = append(events, event)
 	}
@@ -638,6 +641,22 @@ func solveEventUsername(value interface{}) string {
 		return username
 	default:
 		return ""
+	}
+}
+
+func solveEventWithUsername(value interface{}, username string) interface{} {
+	if strings.TrimSpace(username) == "" {
+		return value
+	}
+	switch event := value.(type) {
+	case dashboardSolveEvent:
+		event.Username = username
+		return event
+	case map[string]interface{}:
+		event["username"] = username
+		return event
+	default:
+		return value
 	}
 }
 
@@ -818,18 +837,36 @@ func tailSolveEventsFromPoolLog(path string, max int) []dashboardSolveEvent {
 	}
 	defer f.Close()
 	events := make([]dashboardSolveEvent, 0, max)
+	seen := map[string]int{}
+	usernameByHash := map[string]string{}
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
-		event, ok := parseSolveStatusLogLine(scanner.Text())
+		line := scanner.Text()
+		if username, hash := gotworkLogIdentity(line); username != "" && hash != "" {
+			usernameByHash[hash] = username
+			if idx, ok := seen[hash]; ok && events[idx].Username == "" {
+				events[idx].Username = username
+			}
+		}
+		event, ok := parseSolveStatusLogLine(line)
 		if !ok {
 			continue
 		}
-		events = append(events, event)
-		if len(events) > max {
-			copy(events, events[1:])
-			events = events[:max]
+		if event.Username == "" {
+			event.Username = usernameByHash[event.ParentHash]
 		}
+		if idx, ok := seen[event.ParentHash]; ok {
+			if events[idx].Username == "" && event.Username != "" {
+				events[idx].Username = event.Username
+			}
+			continue
+		}
+		seen[event.ParentHash] = len(events)
+		events = append(events, event)
+	}
+	if len(events) > max {
+		events = events[len(events)-max:]
 	}
 	return events
 }
@@ -838,7 +875,7 @@ func parseSolveStatusLogLine(line string) (dashboardSolveEvent, bool) {
 	const marker = "solve_status,"
 	idx := strings.Index(line, marker)
 	if idx < 0 {
-		return dashboardSolveEvent{}, false
+		return parseStructuredSolveLogLine(line)
 	}
 	ts := solveStatusTimestamp(line[:idx])
 	if ts.IsZero() {
@@ -853,10 +890,29 @@ func parseSolveStatusLogLine(line string) (dashboardSolveEvent, bool) {
 		return dashboardSolveEvent{}, false
 	}
 	parentStatus := strings.TrimSpace(fields[0])
+	return buildDashboardSolveEvent(ts, logKeyValue(line, "username"), parentStatus, parentHash, fields[1:6]), true
+}
+
+func parseStructuredSolveLogLine(line string) (dashboardSolveEvent, bool) {
+	if !strings.Contains(line, "msg=solve") {
+		return dashboardSolveEvent{}, false
+	}
+	parentHash := logKeyValue(line, "parent_hash")
+	parentStatus := logKeyValue(line, "parent_status")
+	auxFlags := strings.Split(logKeyValue(line, "aux_flags"), ",")
+	ts := logLineTimestamp(line)
+	if parentHash == "" || parentStatus == "" || len(auxFlags) < 5 || ts.IsZero() {
+		return dashboardSolveEvent{}, false
+	}
+	return buildDashboardSolveEvent(ts, logKeyValue(line, "username"), parentStatus, parentHash, auxFlags), true
+}
+
+func buildDashboardSolveEvent(ts time.Time, username string, parentStatus string, parentHash string, auxFlags []string) dashboardSolveEvent {
 	parentAccepted := parentStatus == "parent-accepted"
 	event := dashboardSolveEvent{
 		Time:         ts.Format(time.RFC3339),
 		Unix:         ts.Unix(),
+		Username:     username,
 		ParentHash:   parentHash,
 		ParentStatus: parentStatus,
 		ParentValid:  parentAccepted,
@@ -882,7 +938,7 @@ func parseSolveStatusLogLine(line string) (dashboardSolveEvent, bool) {
 		{"UniversalMolecule", "UMO", "MM5"},
 	}
 	for i, aux := range auxLabels {
-		accepted := strings.TrimSpace(fields[i+1]) == "1"
+		accepted := i < len(auxFlags) && strings.TrimSpace(auxFlags[i]) == "1"
 		event.Chains = append(event.Chains, dashboardSolveChainOutcome{
 			Label:     aux.label,
 			Ticker:    aux.ticker,
@@ -903,7 +959,54 @@ func parseSolveStatusLogLine(line string) (dashboardSolveEvent, bool) {
 			event.SkippedCount++
 		}
 	}
-	return event, true
+	return event
+}
+
+func gotworkLogIdentity(line string) (string, string) {
+	if !strings.Contains(line, "gotwork payload debug") {
+		return "", ""
+	}
+	username := logKeyValue(line, "username")
+	hash := logKeyValue(line, "pow_hash")
+	if hash == "" {
+		hash = logKeyValue(line, "hash")
+	}
+	return username, hash
+}
+
+func logKeyValue(line string, key string) string {
+	needle := key + "="
+	idx := strings.Index(line, needle)
+	if idx < 0 {
+		return ""
+	}
+	value := strings.TrimSpace(line[idx+len(needle):])
+	if strings.HasPrefix(value, `"`) {
+		value = value[1:]
+		if end := strings.Index(value, `"`); end >= 0 {
+			return value[:end]
+		}
+		return value
+	}
+	for i, r := range value {
+		if r == ' ' || r == '\t' || r == '\r' || r == '\n' {
+			return strings.Trim(value[:i], `"`)
+		}
+	}
+	return strings.Trim(value, `"`)
+}
+
+func logLineTimestamp(line string) time.Time {
+	raw := logKeyValue(line, "time")
+	if raw == "" {
+		return time.Time{}
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if parsed, err := time.Parse(layout, raw); err == nil {
+			return parsed.UTC()
+		}
+	}
+	return time.Time{}
 }
 
 func solveStatusTimestamp(prefix string) time.Time {

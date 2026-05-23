@@ -78,6 +78,7 @@ type proxyMetrics struct {
 	cacheEvictions          atomic.Int64
 	auxSubmitAttempts       atomic.Int64
 	auxSubmitAccepted       atomic.Int64
+	auxSubmitNotAccepted    atomic.Int64
 	auxSubmitStale          atomic.Int64
 	auxSubmitFailed         atomic.Int64
 }
@@ -376,6 +377,7 @@ func (l *Listener) rpcGotwork(solution types.GotWorkRequest) bool {
 	coinbaseMerkle := solution.CoinbaseMrkl
 	if l.debugGotwork {
 		l.logger.Info("received gotwork payload debug",
+			"username", solution.Username,
 			"coinbase_mrkl_len", len(coinbaseMerkle)/2,
 			"coinbase_mrkl_hex", coinbaseMerkle,
 			"hash", solution.Hash,
@@ -517,7 +519,7 @@ func (l *Listener) rpcGotwork(solution types.GotWorkRequest) bool {
 	if anySolved || solution.ParentValid {
 		l.logger.Info(fmt.Sprintf("%s,solve_status,%s,%s,%s", solveTS, parentStatus, solveFlagText, parentHash))
 	}
-	l.logger.Info("solve", "parent_status", parentStatus, "aux_flags", solveFlagText, "parent_hash", parentHash)
+	l.logger.Info("solve", "username", solution.Username, "parent_status", parentStatus, "aux_flags", solveFlagText, "parent_hash", parentHash)
 	l.recordSolveEvent(solution, parentStatus, parentHash, auxSolved, auxAttempted, auxHashes, auxMerkleIndices)
 	if anySolved || solution.ParentValid || staleSubmission {
 		l.clearPerSolverCache()
@@ -637,8 +639,9 @@ func (l *Listener) submitAuxpow(task auxSubmissionTask) auxSubmissionResult {
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	// submitauxblock returns true for accepted aux blocks. A false result or
-	// stale error means the daemon moved to a newer aux template first.
+	// submitauxblock returns true for accepted aux blocks. False is a normal
+	// not-accepted result for chains that did not win this share; RPC stale
+	// errors mean the daemon moved to a newer aux template first.
 	raw, err := l.auxs[task.chain].Call(ctx, "submitauxblock", task.auxHash, task.auxpow)
 	cancel()
 
@@ -673,10 +676,9 @@ func (l *Listener) submitAuxpow(task auxSubmissionTask) auxSubmissionResult {
 		return result
 	}
 
-	l.logger.Info("aux daemon returned not-accepted; refreshing template", "chain", l.chainAlias(task.chain), "aux_hash", task.auxHash)
-	l.metrics.auxSubmitStale.Add(1)
+	l.logger.Info("aux daemon returned not-accepted for this share", "chain", l.chainAlias(task.chain), "aux_hash", task.auxHash)
+	l.metrics.auxSubmitNotAccepted.Add(1)
 	l.healthTracker.MarkHealthy(task.chain)
-	result.stale = true
 	return result
 }
 
@@ -1169,10 +1171,11 @@ func (l *Listener) rpcStatus() map[string]interface{} {
 		"stored_merkle_capacity": merkleTreesToKeep,
 	}
 	status["submissions"] = map[string]interface{}{
-		"attempts": l.metrics.auxSubmitAttempts.Load(),
-		"accepted": l.metrics.auxSubmitAccepted.Load(),
-		"stale":    l.metrics.auxSubmitStale.Load(),
-		"failed":   l.metrics.auxSubmitFailed.Load(),
+		"attempts":     l.metrics.auxSubmitAttempts.Load(),
+		"accepted":     l.metrics.auxSubmitAccepted.Load(),
+		"not_accepted": l.metrics.auxSubmitNotAccepted.Load(),
+		"stale":        l.metrics.auxSubmitStale.Load(),
+		"failed":       l.metrics.auxSubmitFailed.Load(),
 	}
 	status["recent_solves"] = l.recentSolveEvents()
 	status["parents"] = parents
@@ -1575,6 +1578,7 @@ func (l *Listener) logStatusReport() {
 		"stored_merkle_roots", merkleRoots,
 		"submit_attempts", l.metrics.auxSubmitAttempts.Load(),
 		"submit_accepted", l.metrics.auxSubmitAccepted.Load(),
+		"submit_not_accepted", l.metrics.auxSubmitNotAccepted.Load(),
 		"submit_stale", l.metrics.auxSubmitStale.Load(),
 		"submit_failed", l.metrics.auxSubmitFailed.Load(),
 	)
