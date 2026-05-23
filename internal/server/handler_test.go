@@ -370,6 +370,48 @@ func TestSubmitAuxpowUsesSubmitauxblock(t *testing.T) {
 	}
 }
 
+func TestSubmitAuxpowFalseIsNotAcceptedNotStale(t *testing.T) {
+	var submitCount atomic.Int64
+	aux := jsonRPCServer(t, map[string]rpcReply{
+		"submitauxblock": {result: false, count: &submitCount},
+	})
+	defer aux.Close()
+	client, err := rpc.NewClient(aux.URL, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracker := health.NewTracker()
+	l := &Listener{
+		auxs:          []*rpc.Client{client},
+		healthTracker: tracker,
+		logger:        testLogger(),
+	}
+	tracker.MarkHealthy(0)
+
+	result := l.submitAuxpow(auxSubmissionTask{
+		chain:         0,
+		auxHash:       strings.Repeat("11", 32),
+		auxpow:        "00",
+		merkleIndex:   0,
+		payoutAddress: "bbtc1qpoolpayout",
+	})
+	if result.accepted || result.stale {
+		t.Fatalf("false submitauxblock should be not-accepted only, got %#v", result)
+	}
+	if submitCount.Load() != 1 {
+		t.Fatalf("submitauxblock calls = %d, want 1", submitCount.Load())
+	}
+	if l.metrics.auxSubmitNotAccepted.Load() != 1 {
+		t.Fatalf("not-accepted metric = %d, want 1", l.metrics.auxSubmitNotAccepted.Load())
+	}
+	if l.metrics.auxSubmitStale.Load() != 0 || l.metrics.auxSubmitFailed.Load() != 0 {
+		t.Fatalf("unexpected stale/failed metrics: stale=%d failed=%d", l.metrics.auxSubmitStale.Load(), l.metrics.auxSubmitFailed.Load())
+	}
+	if !tracker.IsHealthy(0) {
+		t.Fatal("not-accepted submitauxblock should keep chain healthy")
+	}
+}
+
 func TestPerSolverCacheEvictsByRecordedOrder(t *testing.T) {
 	l := &Listener{
 		perSolverCache: make(map[string]cacheEntry),
@@ -409,6 +451,7 @@ func TestRPCStatusIncludesOperationalCounters(t *testing.T) {
 	l.metrics.auxTemplateBuilds.Add(2)
 	l.metrics.cacheHits.Add(3)
 	l.metrics.auxSubmitAccepted.Add(4)
+	l.metrics.auxSubmitNotAccepted.Add(5)
 
 	status := l.rpcStatus()
 	if status["ready_count"].(int) != 0 || status["total_chains"].(int) != 0 {
@@ -422,6 +465,9 @@ func TestRPCStatusIncludesOperationalCounters(t *testing.T) {
 	}
 	if status["submissions"].(map[string]interface{})["accepted"].(int64) != 4 {
 		t.Fatalf("missing submission counter: %#v", status["submissions"])
+	}
+	if status["submissions"].(map[string]interface{})["not_accepted"].(int64) != 5 {
+		t.Fatalf("missing not-accepted counter: %#v", status["submissions"])
 	}
 }
 
