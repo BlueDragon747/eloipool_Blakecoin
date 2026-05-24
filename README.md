@@ -1,4 +1,4 @@
-# Eliopool 25.2 Go
+# Eloipool 25.2 Go
 
 This repository builds the BlakeStream 25.2 Eloipool stack in Go: a Stratum
 pool and merged-mining proxy designed to run together. The proxy can also be
@@ -12,7 +12,7 @@ make build
 
 Builds:
 
-- `bin/eliopool` - Go Stratum pool with local pool JSON-RPC, optional embedded proxy, and optional dashboard.
+- `bin/eloipool` - Go Stratum pool with local pool JSON-RPC, optional embedded proxy, and optional dashboard.
 - `bin/merged-mine-proxy` - standalone Go merged-mining proxy.
 
 ## Ports
@@ -45,7 +45,7 @@ proxy does not fall back to legacy no-address `getauxblock` behavior.
 The embedded proxy needs one aux payout address per aux daemon.
 
 ```bash
-bin/eliopool \
+bin/eloipool \
   -dashboard 0.0.0.0:8080 \
   -tracker-address blc1q3ylalmce4hmxglwfdvgpe39xkhx4zy6xqpc3a2 \
   -aux-payout bbtc1qadey359wq6gv3lqr4u6y8uexx8rmled697qhr4 \
@@ -91,6 +91,6 @@ accepted AuxPoW submissions across the 25.2 aux daemons.
 ```bash
 gofmt -w .
 go test ./...
-go build -o bin/eliopool ./cmd/eliopool
+go build -o bin/eloipool ./cmd/eloipool
 go build -o bin/merged-mine-proxy ./cmd/merged-mine-proxy
 ```
