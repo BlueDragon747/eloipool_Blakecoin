@@ -1,7 +1,7 @@
 let lastState=null,lastKey=null,selectedChain='Blakecoin',mkgenWorker='rig1';
 const $=id=>document.getElementById(id);
-const ADDR_TYPE_LABEL={bech32:'BECH32',p2sh:'P2SH',legacy:'LEGACY',none:'UNKNOWN'};
-const ADDR_TYPE_TOOLTIP={bech32:'Native SegWit bech32 payout address',p2sh:'Wrapped SegWit P2SH-P2WPKH payout address',legacy:'Legacy P2PKH payout address',none:'No recognizable payout address or mining key'};
+const ADDR_TYPE_LABEL={bech32:'BECH32',p2sh:'P2SH',legacy:'LEGACY',miningkey:'MINING KEY',none:'UNKNOWN'};
+const ADDR_TYPE_TOOLTIP={bech32:'Native SegWit bech32 payout address',p2sh:'Wrapped SegWit P2SH-P2WPKH payout address',legacy:'Legacy P2PKH payout address',miningkey:'40-hex mining key; payout script type is set by pool configuration',none:'No recognizable payout address or mining key'};
 function esc(v){return String(v??'-').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
 function stat(label,value,cls=''){return '<div class="stat"><span class="label">'+esc(label)+'</span><span class="value '+cls+'">'+esc(value)+'</span></div>'}
 function age(s){s=Number(s||0); if(s<60)return s+'s ago'; if(s<3600)return Math.floor(s/60)+'m ago'; if(s<86400)return Math.floor(s/3600)+'h ago'; return Math.floor(s/86400)+'d ago'}
@@ -152,13 +152,13 @@ function renderMiners(){
   if(!miners.length){$('miners').innerHTML='<div class="empty">no stratum activity yet — copy the URL above and point a miner here</div>'; return}
   const openRows=captureOpen('.id-row','data-row-key');
   $('miners').innerHTML='<div class="id-list">'+miners.map((m,i)=>{
-    const t=m.addr_type||'none', worker=m.worker||'—', addr=m.mining_key||m.addr||m.raw_username||m.username;
+    const t=m.addr_type||'none', worker=m.worker||'—', addr=m.mining_key||m.addr||m.raw_username||m.username, topIdentity=m.raw_username||m.username||addr;
     const solvedBlocks=payoutSolvedBlocks(m);
     const rowKey=(m.raw_username||m.username||'')+'|'+(m.remote||'');
     const detailAddr=m.mining_key?'<dt>mining key</dt><dd class="mono">'+esc(m.mining_key)+'<span class="copy-id" data-copy="'+esc(m.mining_key)+'">copy</span></dd>':'<dt>address</dt><dd class="mono">'+esc(m.addr||'not parsed')+(m.addr?'<span class="copy-id" data-copy="'+esc(m.addr)+'">copy</span>':'')+'</dd>';
     return '<details class="id-row" data-row-key="'+esc(rowKey)+'"><summary>'
-      + '<span>▸</span><span class="dot '+(m.active?'active':'')+'"></span>'+renderAddrType(t)
-      + '<span class="identity"><span class="worker-name">'+esc(worker)+'</span><span class="sep">|</span><span class="addr-mono '+esc(t)+'">'+esc(addr)+'</span></span>'
+      + '<span>▸</span><span class="dot '+(m.active?'active':'')+'"></span>'
+      + '<span class="identity"><span class="addr-mono '+esc(t)+'">'+esc(topIdentity)+'</span></span>'
       + '<span class="id-stats"><span><b>'+esc(m.shares)+'</b>shares</span><span><b>'+esc(m.accepted_shares||m.shares||0)+'</b>accepted</span><span><b>'+esc(solvedBlocks)+'</b>blocks</span><span><b>'+esc(lastShareAge(m.age))+'</b>last</span><span><b>'+esc(m.remote)+'</b>peer</span></span>'
       + '</summary><div class="id-detail"><div class="id-detail-grid"><dl>'
       + '<dt>worker name</dt><dd>'+esc(worker)+'</dd>'+detailAddr+'<dt>address type</dt><dd>'+renderAddrType(t)+'</dd><dt>raw username</dt><dd class="mono">'+esc(m.raw_username||m.username)+'</dd><dt>peer</dt><dd class="mono">'+esc(m.remote)+'</dd><dt>state</dt><dd>'+(m.active?'<span class="good">active</span>':'<span class="muted">idle</span>')+'</dd>'
@@ -175,7 +175,7 @@ function renderSolvedBlocks(){
   if(!rows.length){$('solvedBlocks').innerHTML='<div class="empty">no block candidates recorded yet — accepted/rejected chain chips appear here when a share reaches a parent or aux target</div>'; return}
   $('solvedBlocks').innerHTML='<table class="recent-table solved-table solved-blocks-table"><thead><tr><th class="age-col">age</th><th class="miner-col">miner</th><th class="type-col">type</th><th class="chains-col">chains</th><th class="count-col">accepted</th><th class="count-col">rejected</th></tr></thead><tbody>'+rows.map(ev=>{const id=parseUserDisplay(ev.username||''); const known=Boolean(ev.username); return '<tr><td class="age-col">'+ageTime(ev.time)+'</td><td class="miner-col mono">'+(known?esc(ev.username):'<span class="muted">—</span>')+'</td><td class="type-col">'+(known?renderAddrType(id.type):'<span class="muted">—</span>')+'</td><td class="chains-col">'+renderOutcomeChips(ev.chains)+'</td><td class="count-col good">'+esc(ev.accepted_count||0)+'</td><td class="count-col '+((ev.rejected_count||0)>0?'bad':'muted')+'">'+esc(ev.rejected_count||0)+'</td></tr>'}).join('')+'</tbody></table>';
 }
-function parseUserDisplay(u){let key=u,worker=''; const p=String(u||'').lastIndexOf('.'); if(p>0){key=u.slice(0,p); worker=u.slice(p+1)} let type='none'; if(/^[0-9a-fA-F]{40}$/.test(key))type='bech32'; else if(/^[a-z]+1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+$/.test(key))type='bech32'; else if(/^[13q][123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]{25,61}$/.test(key))type=key[0]==='3'||key[0]==='q'?'p2sh':'legacy'; return {key,worker,type}}
+function parseUserDisplay(u){let key=u,worker=''; const p=String(u||'').lastIndexOf('.'); if(p>0){key=u.slice(0,p); worker=u.slice(p+1)} let type='none'; if(/^[0-9a-fA-F]{40}$/.test(key))type='miningkey'; else if(/^[a-z]+1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+$/.test(key))type='bech32'; else if(/^[13q][123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]{25,61}$/.test(key))type=key[0]==='3'||key[0]==='q'?'p2sh':'legacy'; return {key,worker,type}}
 function renderShares(){
   const shares=(lastState?.recent_shares||[]).slice().reverse();
   const shareCount=$('shareCount');

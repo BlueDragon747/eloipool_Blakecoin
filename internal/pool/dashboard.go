@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -182,7 +183,10 @@ func (s *Service) handleDashboardState(w http.ResponseWriter, r *http.Request) {
 	} else {
 		proxyStatus["_error"] = dashboardError(err)
 	}
-	poolLogPath := dashboardPoolLogPath(s.cfg.ShareLogPath)
+	poolLogPath := strings.TrimSpace(s.cfg.PoolLogPath)
+	if poolLogPath == "" {
+		poolLogPath = dashboardPoolLogPath(s.cfg.ShareLogPath)
+	}
 	recentSolves := mergeDashboardSolveEvents(
 		proxyStatus["recent_solves"],
 		tailSolveEventsFromPoolLog(poolLogPath, 100),
@@ -796,13 +800,19 @@ func dashboardPoolLogPath(shareLogPath string) string {
 	if shareLogPath == "" {
 		return ""
 	}
-	if strings.Contains(shareLogPath, "go-share-log.tsv") {
-		return strings.Replace(shareLogPath, "go-share-log.tsv", "go-pool.log", 1)
+	dir := filepath.Dir(shareLogPath)
+	base := filepath.Base(shareLogPath)
+	switch base {
+	case "go-share-log.tsv", "share-logfile", "shares.log":
+		return filepath.Join(dir, "go-pool.log")
 	}
-	if strings.Contains(shareLogPath, "share-log") {
-		return strings.Replace(shareLogPath, "share-log", "go-pool.log", 1)
+	if strings.Contains(base, "go-share-log.tsv") {
+		return filepath.Join(dir, strings.Replace(base, "go-share-log.tsv", "go-pool.log", 1))
 	}
-	return ""
+	if strings.Contains(base, "share-log") {
+		return filepath.Join(dir, strings.Replace(base, "share-log", "go-pool.log", 1))
+	}
+	return filepath.Join(dir, "go-pool.log")
 }
 
 func tailTextLines(path string, max int) []string {
@@ -1072,14 +1082,8 @@ func parseDashboardIdentity(username string) dashboardIdentity {
 	}
 	head = strings.TrimSpace(head)
 	if isMiningKeyHex(head) {
-		addresses := miningkey.DeriveV2Addresses(strings.ToLower(head), dashboardMiningKeyHRPs())
-		addr := ""
-		if payout, ok := addresses[chainparams.Blakecoin.Name]; ok {
-			addr = payout.Address
-		}
 		return dashboardIdentity{
-			Address:     addr,
-			AddressType: "bech32",
+			AddressType: "miningkey",
 			Worker:      worker,
 			MiningKey:   strings.ToLower(head),
 		}

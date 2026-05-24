@@ -1,6 +1,7 @@
 package block
 
 import (
+	"bytes"
 	"encoding/hex"
 	"testing"
 )
@@ -44,5 +45,43 @@ func TestShareTargetForDifficulty(t *testing.T) {
 	}
 	if _, err := ShareTargetForDifficulty(0); err == nil {
 		t.Fatal("expected invalid zero difficulty")
+	}
+}
+
+func TestRebuildCoinbase(t *testing.T) {
+	got, err := RebuildCoinbase("01000000", "12345678", "9abcdef0", "ffffffff")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []byte{0x01, 0x00, 0x00, 0x00, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0xff, 0xff, 0xff, 0xff}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("coinbase = %x, want %x", got, want)
+	}
+	if _, err := RebuildCoinbase("00", "11", "not-hex", "22"); err == nil {
+		t.Fatal("expected invalid extranonce hex")
+	}
+}
+
+func TestReverseBytes(t *testing.T) {
+	input := []byte{0x01, 0x02, 0x03, 0x04}
+	want := []byte{0x04, 0x03, 0x02, 0x01}
+	got := ReverseBytes(input)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("reverse = %x, want %x", got, want)
+	}
+	if bytes.Equal(input, got) {
+		t.Fatal("ReverseBytes should return a reversed copy")
+	}
+}
+
+func TestReverseWordOrder(t *testing.T) {
+	prev := "00000000000000000000000000000000000000000000000000000000deadbeef"
+	want := "deadbeef00000000000000000000000000000000000000000000000000000000"
+	if got := ReverseWordOrder(prev); got != want {
+		t.Fatalf("word order = %s, want %s", got, want)
+	}
+	odd := "abc"
+	if got := ReverseWordOrder(odd); got != odd {
+		t.Fatalf("odd word order = %s, want %s", got, odd)
 	}
 }

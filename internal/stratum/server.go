@@ -8,11 +8,11 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/blakecoin/merged-mine-proxy/internal/block"
 	"github.com/blakecoin/merged-mine-proxy/internal/share"
 	"github.com/blakecoin/merged-mine-proxy/internal/work"
 )
@@ -249,7 +249,7 @@ func (s *session) sendJob(clean bool) {
 	version := fmt.Sprintf("%08x", job.Template.Version)
 	ntime := fmt.Sprintf("%08x", job.Template.CurTime)
 	bits := job.Template.BitsHex
-	prev := reverseWordOrder(job.Template.PreviousBlockHex)
+	prev := block.ReverseWordOrder(job.Template.PreviousBlockHex)
 	branches := job.Branches
 	if branches == nil {
 		branches = []string{}
@@ -337,20 +337,6 @@ func (s *Server) writeTimeout() time.Duration {
 		return 15 * time.Second
 	}
 	return s.WriteTimeout
-}
-
-func reverseWordOrder(s string) string {
-	if len(s)%8 != 0 {
-		return s
-	}
-	var parts []string
-	for i := 0; i < len(s); i += 8 {
-		parts = append(parts, s[i:i+8])
-	}
-	for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
-		parts[i], parts[j] = parts[j], parts[i]
-	}
-	return strings.Join(parts, "")
 }
 
 func ParseDifficulty(v interface{}) int {

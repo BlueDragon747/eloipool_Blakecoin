@@ -691,6 +691,11 @@ pre {
   color: #7bb7ff;
 }
 
+.type-pill.miningkey {
+  border-color: var(--blue);
+  color: var(--blue);
+}
+
 .type-pill.none {
   border-color: var(--red);
   color: var(--red);
@@ -709,7 +714,7 @@ pre {
 
 .id-row > summary {
   display: grid;
-  grid-template-columns: 18px 14px 60px minmax(0, 1fr) auto;
+  grid-template-columns: 18px 14px minmax(max-content, 1fr) auto;
   gap: 10px;
   align-items: center;
   padding: 10px 12px;
@@ -732,9 +737,9 @@ pre {
 }
 
 .identity {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  min-width: max-content;
+  overflow: visible;
+  white-space: nowrap;
 }
 
 .worker-name {
@@ -750,12 +755,15 @@ pre {
   color: var(--green);
   font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
   font-size: 12px;
+  white-space: nowrap;
 }
 
 .id-stats {
   display: grid;
   grid-template-columns: repeat(5, 74px);
   gap: 8px;
+  justify-self: end;
+  justify-items: end;
   text-align: right;
 }
 
@@ -819,8 +827,8 @@ pre {
 
 .payout-line {
   display: grid;
-  grid-template-columns: 52px 92px minmax(150px, 1fr);
-  gap: 8px;
+  grid-template-columns: 52px 68px minmax(0, 1fr);
+  gap: 6px;
   align-items: center;
 }
 
@@ -841,7 +849,10 @@ pre {
 }
 
 .payout-amount {
-  text-align: right;
+  min-width: 0;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: clip;
   white-space: nowrap;
 }
 

@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+
+	"github.com/blakecoin/merged-mine-proxy/internal/block"
 )
 
 // Tree represents a merkle tree built from leaf hashes
@@ -32,12 +34,12 @@ func NewTreeChecked(leaves []string) (*Tree, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid merkle leaf %d: %w", i, err)
 		}
-		level[i] = reverseBytes(b)
+		level[i] = block.ReverseBytes(b)
 	}
 
 	for {
 		for _, node := range level {
-			detail = append(detail, hex.EncodeToString(reverseBytes(node)))
+			detail = append(detail, hex.EncodeToString(block.ReverseBytes(node)))
 		}
 		if len(level) == 1 {
 			break
@@ -109,15 +111,6 @@ func hashPair(a, b []byte) []byte {
 	h2 := sha256.New()
 	h2.Write(sum)
 	return h2.Sum(nil)
-}
-
-// reverseBytes reverses a byte slice
-func reverseBytes(b []byte) []byte {
-	r := make([]byte, len(b))
-	for i := range b {
-		r[i] = b[len(b)-1-i]
-	}
-	return r
 }
 
 // ReverseChunks reverses a string in chunks of length l (like Python's reverse_chunks)
