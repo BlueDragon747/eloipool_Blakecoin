@@ -55,6 +55,15 @@ bin/eliopool \
   -aux-payout umo1qy7z5lkwmrwg93843malhcunghqluvhu3tdwn5t
 ```
 
+For service managers, the same sensitive RPC values can be supplied through
+environment variables instead of process-visible command-line flags:
+
+- `ELIOPOOL_PARENT_RPC_URL`
+- `ELIOPOOL_PROXY_PARENT_RPC_URL`
+- `ELIOPOOL_AUX_RPC_URLS` as a comma-separated list
+- `ELIOPOOL_AUX_PAYOUTS` as a comma-separated list
+- `ELIOPOOL_AUX_NAMES` as a comma-separated list
+
 Use `-tracker-script <scriptPubKeyHex>` if the parent payout cannot be
 represented as a bech32 witness address.
 

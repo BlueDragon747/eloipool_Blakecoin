@@ -2,6 +2,8 @@ package merkle
 
 import (
 	"testing"
+
+	"github.com/blakecoin/merged-mine-proxy/internal/block"
 )
 
 func TestReverseChunks(t *testing.T) {
@@ -114,7 +116,7 @@ func TestReverseBytes(t *testing.T) {
 	input := []byte{0x01, 0x02, 0x03, 0x04}
 	expected := []byte{0x04, 0x03, 0x02, 0x01}
 
-	result := reverseBytes(input)
+	result := block.ReverseBytes(input)
 	if len(result) != len(expected) {
 		t.Fatalf("Expected length %d, got %d", len(expected), len(result))
 	}

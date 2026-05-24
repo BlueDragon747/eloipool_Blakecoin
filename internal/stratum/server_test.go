@@ -6,13 +6,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blakecoin/merged-mine-proxy/internal/block"
 	"github.com/blakecoin/merged-mine-proxy/internal/share"
 	"github.com/blakecoin/merged-mine-proxy/internal/work"
 )
 
 func TestReverseWordOrderMatchesEloipoolSwap32(t *testing.T) {
 	prev := "00000000000000000000000000000000000000000000000000000000deadbeef"
-	got := reverseWordOrder(prev)
+	got := block.ReverseWordOrder(prev)
 	want := "deadbeef00000000000000000000000000000000000000000000000000000000"
 	if got != want {
 		t.Fatalf("got %s, want %s", got, want)

@@ -309,7 +309,7 @@ func (s *Service) SubmitShare(ctx context.Context, sub share.Submission) share.R
 	}
 	// Rebuild the exact coinbase and parent header the miner hashed. All
 	// accept/reject decisions below are made from this reconstructed header.
-	coinbase, err := hex.DecodeString(job.Coinbase1 + sub.ExtraNonce1 + sub.ExtraNonce2 + job.Coinbase2)
+	coinbase, err := block.RebuildCoinbase(job.Coinbase1, sub.ExtraNonce1, sub.ExtraNonce2, job.Coinbase2)
 	if err != nil {
 		s.rejected.Add(1)
 		return share.Rejected("bad-extranonce")
@@ -374,7 +374,7 @@ func (s *Service) SubmitShare(ctx context.Context, sub share.Submission) share.R
 	s.accepted.Add(1)
 	s.markMinerShare(sub.Username, parentAccepted || auxAccepted)
 	s.logShare(sub, job, powHash[:], parentAccepted)
-	return share.Accepted(job.TargetHex, hex.EncodeToString(reverseCopy(powHash[:])))
+	return share.Accepted(job.TargetHex, hex.EncodeToString(block.ReverseBytes(powHash[:])))
 }
 
 func parentSubmitStatus(raw json.RawMessage, err error) (bool, string) {
@@ -590,7 +590,7 @@ func (s *Service) logShare(sub share.Submission, job *work.Job, powHash []byte, 
 		sub.RemoteAddr,
 		sub.Username,
 		job.ID,
-		strings.ToUpper(hex.EncodeToString(reverseCopy(powHash))),
+		strings.ToUpper(hex.EncodeToString(block.ReverseBytes(powHash))),
 		job.TargetHex,
 		job.Template.BitsHex,
 		parentValid,
@@ -661,14 +661,6 @@ func (s *Service) Status() map[string]interface{} {
 func writeRPC(w http.ResponseWriter, id interface{}, result interface{}, rpcErr *types.JSONRPCError) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(types.JSONRPCResponse{JSONRPC: "2.0", ID: id, Result: result, Error: rpcErr})
-}
-
-func reverseCopy(in []byte) []byte {
-	out := make([]byte, len(in))
-	for i := range in {
-		out[i] = in[len(in)-1-i]
-	}
-	return out
 }
 
 var _ stratum.Pool = (*Service)(nil)

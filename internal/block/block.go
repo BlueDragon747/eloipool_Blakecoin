@@ -64,6 +64,11 @@ func BuildCoinbaseParts(height int64, value int64, scriptPubKey []byte, tag stri
 	return CoinbaseParts{Coinbase1: coinbase1, Coinbase2: hex.EncodeToString(tail), ScriptLen: scriptLen}, nil
 }
 
+// RebuildCoinbase reconstructs the exact coinbase bytes the miner hashed.
+func RebuildCoinbase(coinbase1, extraNonce1, extraNonce2, coinbase2 string) ([]byte, error) {
+	return hex.DecodeString(coinbase1 + extraNonce1 + extraNonce2 + coinbase2)
+}
+
 func BuildHeader(version uint32, prevLE []byte, merkleRoot []byte, ntimeHex string, bitsLE []byte, nonceHex string) ([]byte, error) {
 	if len(prevLE) != 32 {
 		return nil, fmt.Errorf("previous block must be 32 bytes, got %d", len(prevLE))
@@ -86,9 +91,9 @@ func BuildHeader(version uint32, prevLE []byte, merkleRoot []byte, ntimeHex stri
 	hdr = binary.LittleEndian.AppendUint32(hdr, version)
 	hdr = append(hdr, prevLE...)
 	hdr = append(hdr, merkleRoot...)
-	hdr = append(hdr, reverseCopy(ntime)...)
+	hdr = append(hdr, ReverseBytes(ntime)...)
 	hdr = append(hdr, bitsLE...)
-	hdr = append(hdr, reverseCopy(nonce)...)
+	hdr = append(hdr, ReverseBytes(nonce)...)
 	return hdr, nil
 }
 
@@ -192,7 +197,7 @@ func TargetFromHex(targetHex string) (*big.Int, error) {
 }
 
 func HashValueLE(hash []byte) *big.Int {
-	return new(big.Int).SetBytes(reverseCopy(hash))
+	return new(big.Int).SetBytes(ReverseBytes(hash))
 }
 
 func appendVarInt(out []byte, n uint64) []byte {
@@ -227,10 +232,26 @@ func encodeScriptNumber(n int64) []byte {
 	return append([]byte{byte(len(encoded))}, encoded...)
 }
 
-func reverseCopy(in []byte) []byte {
+// ReverseBytes returns a copy of in with the bytes in reverse order.
+func ReverseBytes(in []byte) []byte {
 	out := make([]byte, len(in))
 	for i := range in {
 		out[i] = in[len(in)-1-i]
 	}
 	return out
+}
+
+// ReverseWordOrder reverses 32-bit hex words for Stratum V1 wire order.
+func ReverseWordOrder(s string) string {
+	if len(s)%8 != 0 {
+		return s
+	}
+	parts := make([]string, 0, len(s)/8)
+	for i := 0; i < len(s); i += 8 {
+		parts = append(parts, s[i:i+8])
+	}
+	for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
+		parts[i], parts[j] = parts[j], parts[i]
+	}
+	return strings.Join(parts, "")
 }
