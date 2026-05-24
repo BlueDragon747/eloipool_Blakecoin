@@ -13,7 +13,7 @@ func TestDashboardTemplateRenders(t *testing.T) {
 	}
 	html := buf.String()
 	for _, want := range []string{
-		"Blakestream Eliopool",
+		"Blakestream Eloipool",
 		`/dashboard/static/dashboard.css`,
 		`/dashboard/static/dashboard.js`,
 		`id="chainStats"`,

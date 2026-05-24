@@ -47,7 +47,7 @@ func Parse(args []string) (*Config, error) {
 	var auxNames stringSlice
 
 	cfg := &Config{}
-	fs := flag.NewFlagSet("eliopool", flag.ContinueOnError)
+	fs := flag.NewFlagSet("eloipool", flag.ContinueOnError)
 	fs.StringVar(&cfg.StratumAddr, "stratum", fmt.Sprintf("0.0.0.0:%d", chain.DefaultStratumPort), "stratum listen address")
 	fs.StringVar(&cfg.JSONRPCAddr, "rpc", fmt.Sprintf("127.0.0.1:%d", chain.DefaultPoolJSONRPCPort), "local pool JSON-RPC listen address")
 	fs.StringVar(&cfg.DashboardAddr, "dashboard", "", "dashboard web UI listen address; empty disables the web UI")
