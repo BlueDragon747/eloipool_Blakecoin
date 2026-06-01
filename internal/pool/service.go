@@ -87,6 +87,11 @@ func NewService(cfg *Config, logger *slog.Logger) (*Service, error) {
 	if err := wm.SetShareDifficulty(baseDifficulty); err != nil {
 		return nil, fmt.Errorf("share difficulty: %w", err)
 	}
+	if cfg.ShareTargetHex != "" {
+		if err := wm.SetShareTargetHex(cfg.ShareTargetHex); err != nil {
+			return nil, fmt.Errorf("share target: %w", err)
+		}
+	}
 	script, err := payoutScript(cfg)
 	if err != nil {
 		return nil, err
@@ -340,19 +345,33 @@ func (s *Service) SubmitShare(ctx context.Context, sub share.Submission) share.R
 	parentAccepted := false
 	parentStatus := "parent-rejected"
 	if parentTargetMet {
-		payload, err := block.AssembleBlock(header, coinbase, job.Template.Transactions)
-		if err != nil {
-			parentStatus = "parent-assemble-failed"
-			s.logger.Warn("failed to assemble parent block", "error", err)
-		} else {
-			raw, err := s.parent.Call(ctx, "submitblock", hex.EncodeToString(payload))
-			parentAccepted, parentStatus = parentSubmitStatus(raw, err)
-			if parentAccepted {
-				s.parentFound.Add(1)
-			} else if err != nil {
-				s.logger.Warn("parent submitblock failed", "status", parentStatus, "error", err)
+		submitCoinbase := coinbase
+		coinbaseReady := true
+		if job.Template.WitnessCommitment != "" {
+			withWitness, witnessErr := block.AddZeroReservedWitnessToCoinbase(coinbase)
+			if witnessErr != nil {
+				parentStatus = "parent-coinbase-witness-failed"
+				coinbaseReady = false
+				s.logger.Warn("failed to add parent coinbase witness", "error", witnessErr)
 			} else {
-				s.logger.Warn("parent submitblock rejected", "status", parentStatus, "result", strings.TrimSpace(string(raw)))
+				submitCoinbase = withWitness
+			}
+		}
+		if coinbaseReady {
+			payload, err := block.AssembleBlock(header, submitCoinbase, job.Template.Transactions)
+			if err != nil {
+				parentStatus = "parent-assemble-failed"
+				s.logger.Warn("failed to assemble parent block", "error", err)
+			} else {
+				raw, err := s.parent.Call(ctx, "submitblock", hex.EncodeToString(payload))
+				parentAccepted, parentStatus = parentSubmitStatus(raw, err)
+				if parentAccepted {
+					s.parentFound.Add(1)
+				} else if err != nil {
+					s.logger.Warn("parent submitblock failed", "status", parentStatus, "error", err)
+				} else {
+					s.logger.Warn("parent submitblock rejected", "status", parentStatus, "result", strings.TrimSpace(string(raw)))
+				}
 			}
 		}
 	}

@@ -15,18 +15,20 @@ import (
 )
 
 type Template struct {
-	Version          uint32
-	PreviousBlockHex string
-	PreviousBlockLE  []byte
-	BitsHex          string
-	BitsLE           []byte
-	CurTime          uint32
-	Height           int64
-	CoinbaseValue    int64
-	Transactions     []string
-	Rules            []string
-	Raw              map[string]interface{}
-	Updated          time.Time
+	Version           uint32
+	PreviousBlockHex  string
+	PreviousBlockLE   []byte
+	BitsHex           string
+	BitsLE            []byte
+	CurTime           uint32
+	Height            int64
+	CoinbaseValue     int64
+	Transactions      []string
+	TransactionIDs    []string
+	WitnessCommitment string
+	Rules             []string
+	Raw               map[string]interface{}
+	Updated           time.Time
 }
 
 type Job struct {
@@ -84,6 +86,16 @@ func (m *Manager) SetShareDifficulty(diff int) error {
 	return nil
 }
 
+func (m *Manager) SetShareTargetHex(target string) error {
+	if _, err := block.TargetFromHex(target); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.target = target
+	return nil
+}
+
 func (m *Manager) Current() *Job {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -133,13 +145,20 @@ func (m *Manager) JobWithAux(auxHex string) (*Job, error) {
 }
 
 func (m *Manager) buildJobLocked(tpl *Template, auxHex string) (*Job, error) {
-	branches, err := block.MerkleBranches(tpl.Transactions)
+	branches, err := merkleBranches(tpl)
 	if err != nil {
 		return nil, err
 	}
+	var witnessCommitment []byte
+	if tpl.WitnessCommitment != "" {
+		witnessCommitment, err = hex.DecodeString(tpl.WitnessCommitment)
+		if err != nil {
+			return nil, fmt.Errorf("decode witness commitment: %w", err)
+		}
+	}
 	// Coinbase1/2 are split around extranonce fields because Stratum miners
 	// supply extranonce2 while the server owns extranonce1.
-	parts, err := block.BuildCoinbaseParts(tpl.Height, tpl.CoinbaseValue, m.payoutScript, m.coinbaseTag, auxHex, 8)
+	parts, err := block.BuildCoinbasePartsWithCommitment(tpl.Height, tpl.CoinbaseValue, m.payoutScript, witnessCommitment, m.coinbaseTag, auxHex, 8)
 	if err != nil {
 		return nil, err
 	}
@@ -193,6 +212,7 @@ func ParseTemplate(raw json.RawMessage) (*Template, error) {
 	if cv, err := asInt64(payload["coinbasevalue"]); err == nil {
 		t.CoinbaseValue = cv
 	}
+	t.WitnessCommitment, _ = payload["default_witness_commitment"].(string)
 	if rules, ok := payload["rules"].([]interface{}); ok {
 		for _, rule := range rules {
 			if s, ok := rule.(string); ok {
@@ -205,11 +225,29 @@ func ParseTemplate(raw json.RawMessage) (*Template, error) {
 			if m, ok := tx.(map[string]interface{}); ok {
 				if data, ok := m["data"].(string); ok && data != "" {
 					t.Transactions = append(t.Transactions, data)
+					txid, _ := m["txid"].(string)
+					t.TransactionIDs = append(t.TransactionIDs, txid)
 				}
 			}
 		}
 	}
 	return t, nil
+}
+
+func merkleBranches(tpl *Template) ([]string, error) {
+	if len(tpl.TransactionIDs) == len(tpl.Transactions) {
+		complete := true
+		for _, txid := range tpl.TransactionIDs {
+			if txid == "" {
+				complete = false
+				break
+			}
+		}
+		if complete {
+			return block.MerkleBranchesFromTxIDs(tpl.TransactionIDs)
+		}
+	}
+	return block.MerkleBranches(tpl.Transactions)
 }
 
 func asInt64(v interface{}) (int64, error) {

@@ -34,6 +34,10 @@ type CoinbaseParts struct {
 }
 
 func BuildCoinbaseParts(height int64, value int64, scriptPubKey []byte, tag string, auxHex string, extranonceSize int) (CoinbaseParts, error) {
+	return BuildCoinbasePartsWithCommitment(height, value, scriptPubKey, nil, tag, auxHex, extranonceSize)
+}
+
+func BuildCoinbasePartsWithCommitment(height int64, value int64, scriptPubKey []byte, witnessCommitment []byte, tag string, auxHex string, extranonceSize int) (CoinbaseParts, error) {
 	if extranonceSize <= 0 {
 		extranonceSize = 8
 	}
@@ -56,10 +60,19 @@ func BuildCoinbaseParts(height int64, value int64, scriptPubKey []byte, tag stri
 
 	var tail []byte
 	tail = binary.LittleEndian.AppendUint32(tail, 0xffffffff)
-	tail = append(tail, 1)
+	outputCount := byte(1)
+	if len(witnessCommitment) > 0 {
+		outputCount = 2
+	}
+	tail = append(tail, outputCount)
 	tail = binary.LittleEndian.AppendUint64(tail, uint64(value))
 	tail = appendVarInt(tail, uint64(len(scriptPubKey)))
 	tail = append(tail, scriptPubKey...)
+	if len(witnessCommitment) > 0 {
+		tail = binary.LittleEndian.AppendUint64(tail, 0)
+		tail = appendVarInt(tail, uint64(len(witnessCommitment)))
+		tail = append(tail, witnessCommitment...)
+	}
 	tail = binary.LittleEndian.AppendUint32(tail, 0)
 	return CoinbaseParts{Coinbase1: coinbase1, Coinbase2: hex.EncodeToString(tail), ScriptLen: scriptLen}, nil
 }
@@ -114,6 +127,23 @@ func AssembleBlock(header []byte, coinbase []byte, txHex []string) ([]byte, erro
 	return out, nil
 }
 
+func AddZeroReservedWitnessToCoinbase(coinbase []byte) ([]byte, error) {
+	if len(coinbase) < 10 {
+		return nil, fmt.Errorf("coinbase too short: %d bytes", len(coinbase))
+	}
+	witness := make([]byte, 34)
+	witness[0] = 1
+	witness[1] = 32
+	locktimeOffset := len(coinbase) - 4
+	out := make([]byte, 0, len(coinbase)+2+len(witness))
+	out = append(out, coinbase[:4]...)
+	out = append(out, 0x00, 0x01)
+	out = append(out, coinbase[4:locktimeOffset]...)
+	out = append(out, witness...)
+	out = append(out, coinbase[locktimeOffset:]...)
+	return out, nil
+}
+
 func CoinbaseMerkleRoot(coinbase []byte, branches []string) ([]byte, error) {
 	root := OneSHA(coinbase)
 	for _, branchHex := range branches {
@@ -139,6 +169,36 @@ func MerkleBranches(txHex []string) ([]string, error) {
 		}
 		txid := OneSHA(raw)
 		level = append(level, txid)
+	}
+	var branches []string
+	for len(level) > 1 {
+		if len(level) > 1 && level[1] != nil {
+			branches = append(branches, hex.EncodeToString(level[1]))
+		}
+		if len(level)%2 == 1 {
+			level = append(level, level[len(level)-1])
+		}
+		next := [][]byte{nil}
+		for i := 2; i < len(level); i += 2 {
+			next = append(next, DoubleSHA(append(level[i], level[i+1]...)))
+		}
+		level = next
+	}
+	return branches, nil
+}
+
+func MerkleBranchesFromTxIDs(txIDs []string) ([]string, error) {
+	if len(txIDs) == 0 {
+		return nil, nil
+	}
+	level := make([][]byte, 1, len(txIDs)+1)
+	level[0] = nil
+	for _, txidHex := range txIDs {
+		txid, err := hex.DecodeString(txidHex)
+		if err != nil || len(txid) != 32 {
+			return nil, fmt.Errorf("invalid txid %q", txidHex)
+		}
+		level = append(level, ReverseBytes(txid))
 	}
 	var branches []string
 	for len(level) > 1 {
@@ -220,14 +280,32 @@ func encodeScriptNumber(n int64) []byte {
 	if n == 0 {
 		return []byte{0}
 	}
+	if n > 0 && n <= 16 {
+		return []byte{byte(0x50 + n)}
+	}
+	if n == -1 {
+		return []byte{0x4f}
+	}
+	negative := n < 0
 	var encoded []byte
-	value := uint64(n)
+	var value uint64
+	if negative {
+		value = uint64(-n)
+	} else {
+		value = uint64(n)
+	}
 	for value > 0 {
 		encoded = append(encoded, byte(value&0xff))
 		value >>= 8
 	}
 	if encoded[len(encoded)-1]&0x80 != 0 {
-		encoded = append(encoded, 0)
+		if negative {
+			encoded = append(encoded, 0x80)
+		} else {
+			encoded = append(encoded, 0)
+		}
+	} else if negative {
+		encoded[len(encoded)-1] |= 0x80
 	}
 	return append([]byte{byte(len(encoded))}, encoded...)
 }

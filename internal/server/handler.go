@@ -29,7 +29,7 @@ const (
 	deploymentCacheTTL   = 2 * time.Minute
 	maxRPCBodyBytes      = 1 << 20
 	perSolverCacheLimit  = 1024
-	merkleTreesToKeep    = 240
+	merkleTreesToKeep    = 2048
 	statusReportInterval = 5 * time.Minute
 )
 
@@ -51,6 +51,8 @@ type merkleMeta struct {
 	ChainIndices    map[int]int
 	AuxHashes       map[int]string
 	PayoutAddresses []string
+	Created         time.Time
+	Global          bool
 }
 
 type cacheEntry struct {
@@ -398,9 +400,18 @@ func (l *Listener) rpcGotwork(solution types.GotWorkRequest) bool {
 
 	l.mu.RLock()
 	meta := l.merkleTrees[merkleRoot]
+	storedRoots := len(l.merkleTrees)
+	queueLen := len(l.merkleTreeQueue)
+	recentRoots := l.recentMerkleRootsLocked(8)
 	l.mu.RUnlock()
 	if meta == nil {
-		l.logger.Warn("Unknown merkle root; skipping aux submission", "root", shortHex(merkleRoot))
+		l.logger.Warn("Unknown merkle root; skipping aux submission",
+			"root", shortHex(merkleRoot),
+			"stored_roots", storedRoots,
+			"queue_len", queueLen,
+			"capacity", merkleTreesToKeep,
+			"recent_roots", recentRoots,
+		)
 		return false
 	}
 
@@ -917,21 +928,15 @@ func (l *Listener) buildAuxTemplate(ctx context.Context, payoutAddresses []strin
 	mmaux := merkleRoot + encodeLE32Hex(uint32(l.merkleSize)) + encodeLE32Hex(nonce)
 
 	l.mu.Lock()
-	if _, exists := l.merkleTrees[merkleRoot]; !exists {
-		l.merkleTrees[merkleRoot] = &merkleMeta{
-			Tree:            merkleTree,
-			Nonce:           nonce,
-			ChainIndices:    chainIndices,
-			AuxHashes:       auxBlockHashes,
-			PayoutAddresses: append([]string(nil), payouts...),
-		}
-		l.merkleTreeQueue = append(l.merkleTreeQueue, merkleRoot)
-		if len(l.merkleTreeQueue) > merkleTreesToKeep {
-			old := l.merkleTreeQueue[0]
-			l.merkleTreeQueue = l.merkleTreeQueue[1:]
-			delete(l.merkleTrees, old)
-		}
-	}
+	l.rememberMerkleTree(merkleRoot, &merkleMeta{
+		Tree:            merkleTree,
+		Nonce:           nonce,
+		ChainIndices:    chainIndices,
+		AuxHashes:       auxBlockHashes,
+		PayoutAddresses: append([]string(nil), payouts...),
+		Created:         time.Now(),
+		Global:          globalTemplate,
+	})
 	if propagateParent {
 		l.perSolverCache = make(map[string]cacheEntry)
 		l.perSolverCacheOrder = nil
@@ -1016,6 +1021,38 @@ func (l *Listener) normalizePayoutAddresses(input []string) []string {
 		}
 	}
 	return out
+}
+
+func (l *Listener) rememberMerkleTree(root string, meta *merkleMeta) {
+	if l.merkleTrees == nil {
+		l.merkleTrees = make(map[string]*merkleMeta)
+	}
+	if _, exists := l.merkleTrees[root]; exists {
+		return
+	}
+	l.merkleTrees[root] = meta
+	l.merkleTreeQueue = append(l.merkleTreeQueue, root)
+	if len(l.merkleTreeQueue) <= merkleTreesToKeep {
+		return
+	}
+	old := l.merkleTreeQueue[0]
+	l.merkleTreeQueue = l.merkleTreeQueue[1:]
+	delete(l.merkleTrees, old)
+}
+
+func (l *Listener) recentMerkleRootsLocked(limit int) []string {
+	if limit <= 0 || len(l.merkleTreeQueue) == 0 {
+		return nil
+	}
+	start := len(l.merkleTreeQueue) - limit
+	if start < 0 {
+		start = 0
+	}
+	roots := make([]string, 0, len(l.merkleTreeQueue)-start)
+	for _, root := range l.merkleTreeQueue[start:] {
+		roots = append(roots, shortHex(root))
+	}
+	return roots
 }
 
 func (l *Listener) chainID(chain int) (int, bool) {
