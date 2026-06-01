@@ -304,6 +304,34 @@ func TestGotworkSkipsChainsMissingFromTemplate(t *testing.T) {
 	}
 }
 
+func TestMerkleRootCacheEvictsOldestAfterCapacity(t *testing.T) {
+	l := &Listener{merkleTrees: make(map[string]*merkleMeta)}
+	for i := 0; i < merkleTreesToKeep+2; i++ {
+		root := fmt.Sprintf("%064x", i)
+		l.rememberMerkleTree(root, &merkleMeta{})
+	}
+	if len(l.merkleTrees) != merkleTreesToKeep {
+		t.Fatalf("stored merkle roots = %d, want %d", len(l.merkleTrees), merkleTreesToKeep)
+	}
+	if len(l.merkleTreeQueue) != merkleTreesToKeep {
+		t.Fatalf("merkle root queue = %d, want %d", len(l.merkleTreeQueue), merkleTreesToKeep)
+	}
+	for _, evicted := range []string{fmt.Sprintf("%064x", 0), fmt.Sprintf("%064x", 1)} {
+		if _, ok := l.merkleTrees[evicted]; ok {
+			t.Fatalf("old merkle root %s was not evicted", shortHex(evicted))
+		}
+	}
+	for _, retained := range []string{
+		fmt.Sprintf("%064x", 2),
+		fmt.Sprintf("%064x", merkleTreesToKeep),
+		fmt.Sprintf("%064x", merkleTreesToKeep+1),
+	} {
+		if _, ok := l.merkleTrees[retained]; !ok {
+			t.Fatalf("expected merkle root %s to be retained", shortHex(retained))
+		}
+	}
+}
+
 func TestSubmitAuxpowRequiresPayoutAndDoesNotCallGetauxblock(t *testing.T) {
 	var submitCount atomic.Int64
 	aux := jsonRPCServer(t, map[string]rpcReply{

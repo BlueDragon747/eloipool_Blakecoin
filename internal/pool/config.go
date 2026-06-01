@@ -31,6 +31,7 @@ type Config struct {
 	PollInterval      time.Duration
 	WorkUpdate        time.Duration
 	BaseDifficulty    int
+	ShareTargetHex    string
 	RequireProxyReady bool
 	DebugGotwork      bool
 	StartProxy        bool
@@ -60,6 +61,7 @@ func Parse(args []string) (*Config, error) {
 	fs.DurationVar(&cfg.PollInterval, "poll", 5*time.Second, "parent template poll interval")
 	fs.DurationVar(&cfg.WorkUpdate, "work-update", 55*time.Second, "stratum work refresh interval")
 	fs.IntVar(&cfg.BaseDifficulty, "base-difficulty", 1, "initial stratum share difficulty")
+	fs.StringVar(&cfg.ShareTargetHex, "share-target", envOr("ELIOPOOL_SHARE_TARGET", ""), "explicit 32-byte share target hex override for private/regtest smoke tests")
 	fs.BoolVar(&cfg.RequireProxyReady, "require-proxy-ready", true, "reject stratum shares until merged-mining proxy returns usable aux templates")
 	fs.BoolVar(&cfg.DebugGotwork, "debug-gotwork", false, "log full gotwork coinbase-merkle payloads for auxpow debugging")
 	fs.BoolVar(&cfg.StartProxy, "start-proxy", true, "start the embedded Go merged-mining proxy")

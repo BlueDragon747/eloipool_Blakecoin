@@ -109,6 +109,17 @@ func TestParseBaseDifficulty(t *testing.T) {
 	}
 }
 
+func TestParseShareTargetOverride(t *testing.T) {
+	target := "7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	cfg, err := Parse([]string{"--start-proxy=false", "--share-target", target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ShareTargetHex != target {
+		t.Fatalf("share target = %q, want %q", cfg.ShareTargetHex, target)
+	}
+}
+
 func TestParentSubmitStatusReflectsDaemonResult(t *testing.T) {
 	accepted, status := parentSubmitStatus(json.RawMessage("null"), nil)
 	if !accepted || status != "parent-accepted" {
