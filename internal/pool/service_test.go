@@ -126,12 +126,35 @@ func TestParentSubmitStatusReflectsDaemonResult(t *testing.T) {
 		t.Fatalf("null submit result = %v %s", accepted, status)
 	}
 	accepted, status = parentSubmitStatus(json.RawMessage(`"bad-txn"`), nil)
-	if accepted || status != "parent-rejected" {
+	if accepted || status != "bad-txn" {
 		t.Fatalf("rejection result = %v %s", accepted, status)
 	}
 	accepted, status = parentSubmitStatus(nil, errors.New("connection refused"))
 	if accepted || status != "parent-submit-failed" {
 		t.Fatalf("error result = %v %s", accepted, status)
+	}
+}
+
+func TestParentSubmitStatusClassifiesNonFatalStatuses(t *testing.T) {
+	tests := []struct {
+		status   string
+		nonFatal bool
+	}{
+		{"inconclusive", true},
+		{"duplicate", true},
+		{"stale", true},
+		{"stale-prevblk", true},
+		{"duplicate-inconclusive", true},
+		{"duplicate-invalid", false},
+		{"bad-cb-height", false},
+		{"bad-txnmrklroot", false},
+		{"", false},
+	}
+
+	for _, tt := range tests {
+		if got := isNonFatalParentSubmitStatus(tt.status); got != tt.nonFatal {
+			t.Fatalf("isNonFatalParentSubmitStatus(%q) = %v, want %v", tt.status, got, tt.nonFatal)
+		}
 	}
 }
 

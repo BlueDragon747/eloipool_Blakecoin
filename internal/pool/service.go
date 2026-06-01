@@ -368,7 +368,9 @@ func (s *Service) SubmitShare(ctx context.Context, sub share.Submission) share.R
 				if parentAccepted {
 					s.parentFound.Add(1)
 				} else if err != nil {
-					s.logger.Warn("parent submitblock failed", "status", parentStatus, "error", err)
+					s.logger.Error("parent submitblock failed", "status", parentStatus, "error", err)
+				} else if isNonFatalParentSubmitStatus(parentStatus) {
+					s.logger.Info("parent submitblock race/stale", "status", parentStatus, "result", strings.TrimSpace(string(raw)))
 				} else {
 					s.logger.Warn("parent submitblock rejected", "status", parentStatus, "result", strings.TrimSpace(string(raw)))
 				}
@@ -406,12 +408,22 @@ func parentSubmitStatus(raw json.RawMessage, err error) (bool, string) {
 	}
 	var reject string
 	if json.Unmarshal(raw, &reject) == nil {
-		if strings.TrimSpace(reject) == "" {
+		reject = strings.TrimSpace(reject)
+		if reject == "" {
 			return true, "parent-accepted"
 		}
-		return false, "parent-rejected"
+		return false, reject
 	}
 	return false, "parent-rejected"
+}
+
+func isNonFatalParentSubmitStatus(status string) bool {
+	switch strings.TrimSpace(status) {
+	case "inconclusive", "duplicate", "stale", "stale-prevblk", "duplicate-inconclusive":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Service) getAuxFor(username string) (string, error) {
