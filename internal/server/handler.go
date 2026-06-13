@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -655,12 +654,10 @@ func tickerForChainName(name string, fallback string) string {
 
 func auxSubmissionCacheKey(task auxSubmissionTask) string {
 	auxHash := strings.ToLower(strings.TrimSpace(task.auxHash))
-	auxpow := strings.TrimSpace(task.auxpow)
-	if auxHash == "" || auxpow == "" {
+	if auxHash == "" {
 		return ""
 	}
-	auxpowHash := sha256.Sum256([]byte(auxpow))
-	return strconv.Itoa(task.chain) + "|" + auxHash + "|" + hex.EncodeToString(auxpowHash[:])
+	return strconv.Itoa(task.chain) + "|" + auxHash
 }
 
 func (l *Listener) terminalAuxSubmission(task auxSubmissionTask) (auxSubmissionTerminalState, bool) {

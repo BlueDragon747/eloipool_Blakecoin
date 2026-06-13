@@ -437,7 +437,7 @@ func TestSubmitAuxpowSuppressesDuplicateAcceptedHash(t *testing.T) {
 	}
 }
 
-func TestSubmitAuxpowSameHashDifferentPayloadStillSubmits(t *testing.T) {
+func TestSubmitAuxpowSuppressesSameHashDifferentPayloadAfterAccepted(t *testing.T) {
 	var submitCount atomic.Int64
 	aux := jsonRPCServer(t, map[string]rpcReply{
 		"submitauxblock": {result: true, count: &submitCount},
@@ -464,14 +464,14 @@ func TestSubmitAuxpowSameHashDifferentPayloadStillSubmits(t *testing.T) {
 
 	first := l.submitAuxpow(firstTask)
 	second := l.submitAuxpow(secondTask)
-	if !first.accepted || !second.accepted {
-		t.Fatalf("expected both different payloads accepted, got first=%#v second=%#v", first, second)
+	if !first.accepted {
+		t.Fatalf("expected first submit accepted, got %#v", first)
 	}
-	if first.suppressed || second.suppressed {
-		t.Fatalf("different payloads must not be suppressed, got first=%#v second=%#v", first, second)
+	if !second.suppressed || second.accepted || second.stale {
+		t.Fatalf("expected second same-hash payload suppressed after terminal accepted result, got %#v", second)
 	}
-	if submitCount.Load() != 2 {
-		t.Fatalf("submitauxblock calls = %d, want 2", submitCount.Load())
+	if submitCount.Load() != 1 {
+		t.Fatalf("submitauxblock calls = %d, want 1", submitCount.Load())
 	}
 }
 
