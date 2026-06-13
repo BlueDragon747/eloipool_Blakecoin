@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -24,13 +25,15 @@ import (
 )
 
 const (
-	auxUpdateInterval    = 15 * time.Second
-	auxSolverCacheTTL    = 1 * time.Second
-	deploymentCacheTTL   = 2 * time.Minute
-	maxRPCBodyBytes      = 1 << 20
-	perSolverCacheLimit  = 1024
-	merkleTreesToKeep    = 2048
-	statusReportInterval = 5 * time.Minute
+	auxUpdateInterval       = 15 * time.Second
+	auxSolverCacheTTL       = 1 * time.Second
+	auxSubmissionCacheTTL   = 10 * time.Minute
+	deploymentCacheTTL      = 2 * time.Minute
+	maxRPCBodyBytes         = 1 << 20
+	perSolverCacheLimit     = 1024
+	auxSubmissionCacheLimit = 4096
+	merkleTreesToKeep       = 2048
+	statusReportInterval    = 5 * time.Minute
 )
 
 var chainAliases = []string{"MM", "MM1", "MM3", "MM4", "MM5"}
@@ -103,9 +106,16 @@ type auxSubmissionTask struct {
 }
 
 type auxSubmissionResult struct {
-	chain    int
+	chain      int
+	accepted   bool
+	stale      bool
+	suppressed bool
+}
+
+type auxSubmissionTerminalState struct {
 	accepted bool
 	stale    bool
+	created  time.Time
 }
 
 type solveChainOutcome struct {
@@ -150,6 +160,7 @@ type Listener struct {
 	rewriteTarget       string
 	merkleTreeQueue     []string
 	merkleTrees         map[string]*merkleMeta
+	auxSubmissionCache  map[string]auxSubmissionTerminalState
 	perSolverCache      map[string]cacheEntry
 	perSolverCacheOrder []cacheOrderEntry
 	perSolverCacheSeq   uint64
@@ -160,6 +171,7 @@ type Listener struct {
 	backgroundCtx       context.Context
 	metrics             proxyMetrics
 	mu                  sync.RWMutex
+	auxSubmitMu         sync.Mutex
 	solveMu             sync.RWMutex
 	buildMu             sync.Mutex
 	logger              *slog.Logger
@@ -220,6 +232,7 @@ func NewListener(cfg *config.Config, logger *slog.Logger) (*Listener, error) {
 		healthTracker:       health.NewTracker(),
 		merkleSize:          cfg.MerkleSize,
 		merkleTrees:         make(map[string]*merkleMeta),
+		auxSubmissionCache:  make(map[string]auxSubmissionTerminalState),
 		perSolverCache:      make(map[string]cacheEntry),
 		deploymentCache:     make(map[int]deploymentCacheEntry),
 		lastVersionSummary:  make(map[int]string),
@@ -507,6 +520,10 @@ func (l *Listener) rpcGotwork(solution types.GotWorkRequest) bool {
 	close(results)
 
 	for result := range results {
+		if result.suppressed {
+			auxAttempted[result.chain] = false
+			continue
+		}
 		auxSolved[result.chain] = result.accepted
 		if result.accepted {
 			anySolved = true
@@ -636,8 +653,89 @@ func tickerForChainName(name string, fallback string) string {
 	return fallback
 }
 
+func auxSubmissionCacheKey(task auxSubmissionTask) string {
+	auxHash := strings.ToLower(strings.TrimSpace(task.auxHash))
+	auxpow := strings.TrimSpace(task.auxpow)
+	if auxHash == "" || auxpow == "" {
+		return ""
+	}
+	auxpowHash := sha256.Sum256([]byte(auxpow))
+	return strconv.Itoa(task.chain) + "|" + auxHash + "|" + hex.EncodeToString(auxpowHash[:])
+}
+
+func (l *Listener) terminalAuxSubmission(task auxSubmissionTask) (auxSubmissionTerminalState, bool) {
+	key := auxSubmissionCacheKey(task)
+	if key == "" {
+		return auxSubmissionTerminalState{}, false
+	}
+	now := time.Now()
+	l.auxSubmitMu.Lock()
+	defer l.auxSubmitMu.Unlock()
+	if l.auxSubmissionCache == nil {
+		l.auxSubmissionCache = make(map[string]auxSubmissionTerminalState)
+	}
+	l.pruneAuxSubmissionCacheLocked(now)
+	state, ok := l.auxSubmissionCache[key]
+	return state, ok
+}
+
+func (l *Listener) rememberTerminalAuxSubmission(task auxSubmissionTask, accepted bool, stale bool) {
+	if !accepted && !stale {
+		return
+	}
+	key := auxSubmissionCacheKey(task)
+	if key == "" {
+		return
+	}
+	now := time.Now()
+	l.auxSubmitMu.Lock()
+	defer l.auxSubmitMu.Unlock()
+	if l.auxSubmissionCache == nil {
+		l.auxSubmissionCache = make(map[string]auxSubmissionTerminalState)
+	}
+	l.auxSubmissionCache[key] = auxSubmissionTerminalState{
+		accepted: accepted,
+		stale:    stale,
+		created:  now,
+	}
+	l.pruneAuxSubmissionCacheLocked(now)
+}
+
+func (l *Listener) pruneAuxSubmissionCacheLocked(now time.Time) {
+	for key, state := range l.auxSubmissionCache {
+		if now.Sub(state.created) > auxSubmissionCacheTTL {
+			delete(l.auxSubmissionCache, key)
+		}
+	}
+	for len(l.auxSubmissionCache) > auxSubmissionCacheLimit {
+		var oldestKey string
+		var oldestTime time.Time
+		for key, state := range l.auxSubmissionCache {
+			if oldestKey == "" || state.created.Before(oldestTime) {
+				oldestKey = key
+				oldestTime = state.created
+			}
+		}
+		if oldestKey == "" {
+			return
+		}
+		delete(l.auxSubmissionCache, oldestKey)
+	}
+}
+
 func (l *Listener) submitAuxpow(task auxSubmissionTask) auxSubmissionResult {
 	result := auxSubmissionResult{chain: task.chain}
+	if state, ok := l.terminalAuxSubmission(task); ok {
+		l.logger.Debug("Skipping duplicate terminal aux submission",
+			"chain", l.chainAlias(task.chain),
+			"aux_hash", task.auxHash,
+			"accepted", state.accepted,
+			"stale", state.stale,
+		)
+		result.suppressed = true
+		return result
+	}
+
 	l.metrics.auxSubmitAttempts.Add(1)
 
 	l.logger.Info(fmt.Sprintf("%s: aux_hash=%s merkle_index=%d", l.chainAlias(task.chain), task.auxHash, task.merkleIndex))
@@ -661,6 +759,7 @@ func (l *Listener) submitAuxpow(task auxSubmissionTask) auxSubmissionResult {
 			l.logger.Info("aux chain moved past hash; share orphaned at aux layer", "chain", l.chainAlias(task.chain), "aux_hash", task.auxHash)
 			l.metrics.auxSubmitStale.Add(1)
 			l.healthTracker.MarkHealthy(task.chain)
+			l.rememberTerminalAuxSubmission(task, false, true)
 			result.stale = true
 			return result
 		}
@@ -684,6 +783,7 @@ func (l *Listener) submitAuxpow(task auxSubmissionTask) auxSubmissionResult {
 		l.logger.Info("Block accepted", "chain", l.chainAlias(task.chain))
 		l.metrics.auxSubmitAccepted.Add(1)
 		l.healthTracker.MarkHealthy(task.chain)
+		l.rememberTerminalAuxSubmission(task, true, false)
 		return result
 	}
 

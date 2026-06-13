@@ -398,6 +398,119 @@ func TestSubmitAuxpowUsesSubmitauxblock(t *testing.T) {
 	}
 }
 
+func TestSubmitAuxpowSuppressesDuplicateAcceptedHash(t *testing.T) {
+	var submitCount atomic.Int64
+	aux := jsonRPCServer(t, map[string]rpcReply{
+		"submitauxblock": {result: true, count: &submitCount},
+	})
+	defer aux.Close()
+	client, err := rpc.NewClient(aux.URL, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := &Listener{
+		auxs:          []*rpc.Client{client},
+		healthTracker: health.NewTracker(),
+		logger:        testLogger(),
+	}
+	task := auxSubmissionTask{
+		chain:         0,
+		auxHash:       strings.Repeat("11", 32),
+		auxpow:        "00",
+		merkleIndex:   0,
+		payoutAddress: "bbtc1qpoolpayout",
+	}
+
+	first := l.submitAuxpow(task)
+	second := l.submitAuxpow(task)
+	if !first.accepted {
+		t.Fatalf("expected first submit accepted, got %#v", first)
+	}
+	if !second.suppressed || second.accepted || second.stale {
+		t.Fatalf("expected second submit suppressed only, got %#v", second)
+	}
+	if submitCount.Load() != 1 {
+		t.Fatalf("submitauxblock calls = %d, want 1", submitCount.Load())
+	}
+	if l.metrics.auxSubmitAttempts.Load() != 1 {
+		t.Fatalf("submit attempts = %d, want 1", l.metrics.auxSubmitAttempts.Load())
+	}
+}
+
+func TestSubmitAuxpowSameHashDifferentPayloadStillSubmits(t *testing.T) {
+	var submitCount atomic.Int64
+	aux := jsonRPCServer(t, map[string]rpcReply{
+		"submitauxblock": {result: true, count: &submitCount},
+	})
+	defer aux.Close()
+	client, err := rpc.NewClient(aux.URL, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := &Listener{
+		auxs:          []*rpc.Client{client},
+		healthTracker: health.NewTracker(),
+		logger:        testLogger(),
+	}
+	firstTask := auxSubmissionTask{
+		chain:         0,
+		auxHash:       strings.Repeat("11", 32),
+		auxpow:        "00",
+		merkleIndex:   0,
+		payoutAddress: "bbtc1qpoolpayout",
+	}
+	secondTask := firstTask
+	secondTask.auxpow = "01"
+
+	first := l.submitAuxpow(firstTask)
+	second := l.submitAuxpow(secondTask)
+	if !first.accepted || !second.accepted {
+		t.Fatalf("expected both different payloads accepted, got first=%#v second=%#v", first, second)
+	}
+	if first.suppressed || second.suppressed {
+		t.Fatalf("different payloads must not be suppressed, got first=%#v second=%#v", first, second)
+	}
+	if submitCount.Load() != 2 {
+		t.Fatalf("submitauxblock calls = %d, want 2", submitCount.Load())
+	}
+}
+
+func TestSubmitAuxpowSuppressesDuplicateStaleHash(t *testing.T) {
+	var submitCount atomic.Int64
+	aux := jsonRPCServer(t, map[string]rpcReply{
+		"submitauxblock": {errCode: -8, errMessage: "block hash unknown", count: &submitCount},
+	})
+	defer aux.Close()
+	client, err := rpc.NewClient(aux.URL, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := &Listener{
+		auxs:          []*rpc.Client{client},
+		healthTracker: health.NewTracker(),
+		logger:        testLogger(),
+	}
+	task := auxSubmissionTask{
+		chain:         0,
+		auxHash:       strings.Repeat("22", 32),
+		auxpow:        "00",
+		merkleIndex:   0,
+		payoutAddress: "bbtc1qpoolpayout",
+	}
+
+	first := l.submitAuxpow(task)
+	second := l.submitAuxpow(task)
+	if !first.stale {
+		t.Fatalf("expected first submit stale, got %#v", first)
+	}
+	if !second.suppressed || second.accepted || second.stale {
+		t.Fatalf("expected second submit suppressed only, got %#v", second)
+	}
+	if submitCount.Load() != 1 {
+		t.Fatalf("submitauxblock calls = %d, want 1", submitCount.Load())
+	}
+}
+
 func TestSubmitAuxpowFalseIsNotAcceptedNotStale(t *testing.T) {
 	var submitCount atomic.Int64
 	aux := jsonRPCServer(t, map[string]rpcReply{
@@ -437,6 +550,39 @@ func TestSubmitAuxpowFalseIsNotAcceptedNotStale(t *testing.T) {
 	}
 	if !tracker.IsHealthy(0) {
 		t.Fatal("not-accepted submitauxblock should keep chain healthy")
+	}
+}
+
+func TestSubmitAuxpowFalseDoesNotSuppressSameHash(t *testing.T) {
+	var submitCount atomic.Int64
+	aux := jsonRPCServer(t, map[string]rpcReply{
+		"submitauxblock": {result: false, count: &submitCount},
+	})
+	defer aux.Close()
+	client, err := rpc.NewClient(aux.URL, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := &Listener{
+		auxs:          []*rpc.Client{client},
+		healthTracker: health.NewTracker(),
+		logger:        testLogger(),
+	}
+	task := auxSubmissionTask{
+		chain:         0,
+		auxHash:       strings.Repeat("33", 32),
+		auxpow:        "00",
+		merkleIndex:   0,
+		payoutAddress: "bbtc1qpoolpayout",
+	}
+
+	first := l.submitAuxpow(task)
+	second := l.submitAuxpow(task)
+	if first.suppressed || second.suppressed || first.accepted || second.accepted || first.stale || second.stale {
+		t.Fatalf("false submitauxblock should not be terminal, got first=%#v second=%#v", first, second)
+	}
+	if submitCount.Load() != 2 {
+		t.Fatalf("submitauxblock calls = %d, want 2", submitCount.Load())
 	}
 }
 
