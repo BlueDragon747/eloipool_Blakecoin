@@ -56,6 +56,18 @@ type Service struct {
 	parentFound    atomic.Int64
 	gotworkSent    atomic.Int64
 	gotworkSkipped atomic.Int64
+
+	// parent health / template staleness tracking
+	templateMu          sync.Mutex
+	lastTemplateHash    string
+	lastTemplateHeight  int64
+	lastTemplateAt      time.Time
+	inconclusiveStreak  int
+	parentSubmitEnabled bool
+
+	// parent heartbeat
+	lastParentHeight   int64
+	lastParentHeightAt time.Time
 }
 
 type minerState struct {
@@ -98,14 +110,15 @@ func NewService(cfg *Config, logger *slog.Logger) (*Service, error) {
 	}
 	wm.SetPayoutScript(script)
 	s := &Service{
-		cfg:      cfg,
-		logger:   logger,
-		parent:   parent,
-		proxy:    proxy,
-		work:     wm,
-		baseDiff: baseDifficulty,
-		miners:   make(map[string]minerState),
-		jobs:     make(map[string]*work.Job),
+		cfg:                 cfg,
+		logger:              logger,
+		parent:              parent,
+		proxy:               proxy,
+		work:                wm,
+		baseDiff:            baseDifficulty,
+		miners:              make(map[string]minerState),
+		jobs:                make(map[string]*work.Job),
+		parentSubmitEnabled: true,
 	}
 	for _, auxURL := range cfg.ProxyAuxURLs {
 		client, err := rpc.NewClient(auxURL, logger)
@@ -166,6 +179,7 @@ func (s *Service) Run(ctx context.Context) error {
 		Pool:       s,
 		Logger:     s.logger,
 		Difficulty: s.baseDiff,
+		WorkUpdate: s.cfg.WorkUpdate,
 	}
 	return stratumServer.ListenAndServe(ctx)
 }
@@ -254,6 +268,7 @@ func (s *Service) startPoolRPC(ctx context.Context) error {
 }
 
 func (s *Service) templateLoop(ctx context.Context) {
+	go s.parentHeartbeatLoop(ctx)
 	ticker := time.NewTicker(s.cfg.PollInterval)
 	defer ticker.Stop()
 	for {
@@ -261,14 +276,104 @@ func (s *Service) templateLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if _, err := s.work.Update(); err != nil {
+			job, err := s.work.Update()
+			if err != nil {
 				s.logger.Warn("template update failed", "error", err)
+			} else {
+				s.recordTemplateUpdate(job)
 			}
 		}
 	}
 }
 
+func (s *Service) recordTemplateUpdate(job *work.Job) {
+	if job == nil || job.Template == nil {
+		return
+	}
+	s.templateMu.Lock()
+	defer s.templateMu.Unlock()
+	now := time.Now()
+	changed := job.Template.PreviousBlockHex != s.lastTemplateHash || job.Template.Height != s.lastTemplateHeight
+	if changed {
+		if s.inconclusiveStreak > 0 {
+			s.logger.Info("parent template refreshed; resetting inconclusive streak", "streak", s.inconclusiveStreak)
+		}
+		s.inconclusiveStreak = 0
+		s.parentSubmitEnabled = true
+		s.lastTemplateHash = job.Template.PreviousBlockHex
+		s.lastTemplateHeight = job.Template.Height
+		s.lastTemplateAt = now
+		return
+	}
+	if s.lastTemplateAt.IsZero() {
+		s.lastTemplateAt = now
+		return
+	}
+	staleDuration := now.Sub(s.lastTemplateAt)
+	if staleDuration > s.cfg.StaleTemplateThreshold {
+		s.logger.Warn("parent template is stale; forcing connection reset",
+			"stale_duration", staleDuration.Seconds(),
+			"threshold", s.cfg.StaleTemplateThreshold.Seconds(),
+			"height", s.lastTemplateHeight,
+			"hash", s.lastTemplateHash,
+		)
+		s.parent.ResetConnection()
+	}
+}
+
+func (s *Service) parentHeartbeatLoop(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.checkParentHeartbeat()
+		}
+	}
+}
+
+func (s *Service) checkParentHeartbeat() {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	raw, err := s.parent.Call(ctx, "getblockchaininfo")
+	cancel()
+	if err != nil {
+		s.logger.Warn("parent heartbeat failed", "error", err)
+		return
+	}
+	var info struct {
+		Blocks int64 `json:"blocks"`
+	}
+	if err := json.Unmarshal(raw, &info); err != nil {
+		s.logger.Warn("parent heartbeat parse failed", "error", err)
+		return
+	}
+	s.templateMu.Lock()
+	lastHeight := s.lastParentHeight
+	lastAt := s.lastParentHeightAt
+	now := time.Now()
+	s.lastParentHeight = info.Blocks
+	s.lastParentHeightAt = now
+	s.templateMu.Unlock()
+	if lastHeight == 0 || lastAt.IsZero() {
+		return
+	}
+	if info.Blocks <= lastHeight {
+		s.logger.Warn("parent daemon height not advancing; forcing connection reset",
+			"last_height", lastHeight,
+			"current_height", info.Blocks,
+			"elapsed", now.Sub(lastAt).Seconds(),
+		)
+		s.parent.ResetConnection()
+	}
+}
+
 func (s *Service) CurrentJob(username string) *work.Job {
+	if s.isTemplateStale() {
+		s.logger.Warn("parent template is stale; withholding stratum job", "miner", username)
+		return nil
+	}
 	auxHex := ""
 	if s.cfg.RequireProxyReady {
 		// Do not hand out public stratum work until the merged-mining proxy has
@@ -288,6 +393,15 @@ func (s *Service) CurrentJob(username string) *work.Job {
 	}
 	s.storeJob(username, job)
 	return job
+}
+
+func (s *Service) isTemplateStale() bool {
+	s.templateMu.Lock()
+	defer s.templateMu.Unlock()
+	if s.lastTemplateAt.IsZero() {
+		return false
+	}
+	return time.Since(s.lastTemplateAt) > s.cfg.StaleTemplateThreshold
 }
 
 func (s *Service) RegisterMiner(username, remote string) {
@@ -362,7 +476,7 @@ func (s *Service) SubmitShare(ctx context.Context, sub share.Submission) share.R
 			if err != nil {
 				parentStatus = "parent-assemble-failed"
 				s.logger.Warn("failed to assemble parent block", "error", err)
-			} else {
+			} else if s.shouldSubmitParent() {
 				raw, err := s.parent.Call(ctx, "submitblock", hex.EncodeToString(payload))
 				parentAccepted, parentStatus = parentSubmitStatus(raw, err)
 				if parentAccepted {
@@ -370,10 +484,12 @@ func (s *Service) SubmitShare(ctx context.Context, sub share.Submission) share.R
 				} else if err != nil {
 					s.logger.Error("parent submitblock failed", "status", parentStatus, "error", err)
 				} else if isNonFatalParentSubmitStatus(parentStatus) {
-					s.logger.Info("parent submitblock race/stale", "status", parentStatus, "result", strings.TrimSpace(string(raw)))
+					s.handleNonFatalParentStatus(parentStatus)
 				} else {
 					s.logger.Warn("parent submitblock rejected", "status", parentStatus, "result", strings.TrimSpace(string(raw)))
 				}
+			} else {
+				parentStatus = "parent-submit-disabled"
 			}
 		}
 	}
@@ -424,6 +540,28 @@ func isNonFatalParentSubmitStatus(status string) bool {
 	default:
 		return false
 	}
+}
+
+func (s *Service) shouldSubmitParent() bool {
+	s.templateMu.Lock()
+	defer s.templateMu.Unlock()
+	return s.parentSubmitEnabled
+}
+
+func (s *Service) handleNonFatalParentStatus(status string) {
+	s.templateMu.Lock()
+	defer s.templateMu.Unlock()
+	if strings.TrimSpace(status) == "inconclusive" {
+		s.inconclusiveStreak++
+		if s.inconclusiveStreak >= 3 {
+			if s.parentSubmitEnabled {
+				s.logger.Warn("parent inconclusive streak reached; disabling parent block submission", "streak", s.inconclusiveStreak)
+			}
+			s.parentSubmitEnabled = false
+			return
+		}
+	}
+	s.logger.Info("parent submitblock race/stale", "status", status)
 }
 
 func (s *Service) getAuxFor(username string) (string, error) {

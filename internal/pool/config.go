@@ -19,27 +19,28 @@ func (s *stringSlice) Set(value string) error {
 }
 
 type Config struct {
-	StratumAddr       string
-	JSONRPCAddr       string
-	DashboardAddr     string
-	ParentRPCURL      string
-	ProxyAddr         string
-	TrackerAddress    string
-	TrackerScriptHex  string
-	ShareLogPath      string
-	PoolLogPath       string
-	PollInterval      time.Duration
-	WorkUpdate        time.Duration
-	BaseDifficulty    int
-	ShareTargetHex    string
-	RequireProxyReady bool
-	DebugGotwork      bool
-	StartProxy        bool
-	ProxyParentURL    string
-	ProxyAuxURLs      []string
-	ProxyAuxPayouts   []string
-	ProxyAuxNames     []string
-	ProxyMerkleSize   int
+	StratumAddr            string
+	JSONRPCAddr            string
+	DashboardAddr          string
+	ParentRPCURL           string
+	ProxyAddr              string
+	TrackerAddress         string
+	TrackerScriptHex       string
+	ShareLogPath           string
+	PoolLogPath            string
+	PollInterval           time.Duration
+	WorkUpdate             time.Duration
+	StaleTemplateThreshold time.Duration
+	BaseDifficulty         int
+	ShareTargetHex         string
+	RequireProxyReady      bool
+	DebugGotwork           bool
+	StartProxy             bool
+	ProxyParentURL         string
+	ProxyAuxURLs           []string
+	ProxyAuxPayouts        []string
+	ProxyAuxNames          []string
+	ProxyMerkleSize        int
 }
 
 func Parse(args []string) (*Config, error) {
@@ -60,6 +61,7 @@ func Parse(args []string) (*Config, error) {
 	fs.StringVar(&cfg.PoolLogPath, "pool-log", "", "pool runtime log path for dashboard display")
 	fs.DurationVar(&cfg.PollInterval, "poll", 5*time.Second, "parent template poll interval")
 	fs.DurationVar(&cfg.WorkUpdate, "work-update", 55*time.Second, "stratum work refresh interval")
+	fs.DurationVar(&cfg.StaleTemplateThreshold, "stale-template-threshold", 6*time.Minute, "max time a parent template can remain unchanged before it is considered stale")
 	fs.IntVar(&cfg.BaseDifficulty, "base-difficulty", 1, "initial stratum share difficulty")
 	fs.StringVar(&cfg.ShareTargetHex, "share-target", envOr("ELIOPOOL_SHARE_TARGET", ""), "explicit 32-byte share target hex override for private/regtest smoke tests")
 	fs.BoolVar(&cfg.RequireProxyReady, "require-proxy-ready", true, "reject stratum shares until merged-mining proxy returns usable aux templates")
@@ -102,6 +104,9 @@ func Parse(args []string) (*Config, error) {
 	}
 	if cfg.BaseDifficulty <= 0 {
 		return nil, fmt.Errorf("--base-difficulty must be positive")
+	}
+	if cfg.StaleTemplateThreshold <= 0 {
+		cfg.StaleTemplateThreshold = 6 * time.Minute
 	}
 	return cfg, nil
 }

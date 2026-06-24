@@ -19,7 +19,7 @@ const (
 	maxRetries             = 2
 	dialTimeout            = 8 * time.Second
 	requestTimeout         = 35 * time.Second
-	idleTimeout            = 30 * time.Minute
+	idleTimeout            = 5 * time.Minute
 	maxConsecutiveFailures = 5
 	breakerCooldown        = 15 * time.Second
 )
@@ -167,6 +167,13 @@ func (c *Client) clientForAttempt() (*http.Client, error) {
 		c.connectLocked()
 	}
 	return c.client, nil
+}
+
+// ResetConnection forces a new HTTP connection on the next request.
+func (c *Client) ResetConnection() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.connectLocked()
 }
 
 func (c *Client) resetConnection() {

@@ -34,6 +34,7 @@ type Server struct {
 	AuthTimeout     time.Duration
 	ReadIdleTimeout time.Duration
 	WriteTimeout    time.Duration
+	WorkUpdate      time.Duration
 	nextID          atomic.Uint64
 	sessions        atomic.Int64
 }
@@ -51,17 +52,18 @@ type response struct {
 }
 
 type session struct {
-	id         uint64
-	extraNonce string
-	username   string
-	remote     string
-	userAgent  string
-	server     *Server
-	conn       net.Conn
-	writer     *bufio.Writer
-	writeMu    sync.Mutex
-	done       chan struct{}
-	notifying  bool
+	id           uint64
+	extraNonce   string
+	username     string
+	remote       string
+	userAgent    string
+	server       *Server
+	conn         net.Conn
+	writer       *bufio.Writer
+	writeMu      sync.Mutex
+	done         chan struct{}
+	notifying    bool
+	lastTemplate *work.Template
 }
 
 func (s *Server) ListenAndServe(ctx context.Context) error {
@@ -219,7 +221,7 @@ func (s *session) handle(ctx context.Context, req request) {
 }
 
 func (s *session) notifyLoop(ctx context.Context) {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(s.server.workUpdate())
 	defer ticker.Stop()
 	for {
 		select {
@@ -246,6 +248,12 @@ func (s *session) sendJob(clean bool) {
 	if job == nil || job.Template == nil {
 		return
 	}
+	// If the underlying parent template has changed, force miners to drop
+	// stale work by sending clean=true.
+	if !clean && job.Template != s.lastTemplate {
+		clean = true
+	}
+	s.lastTemplate = job.Template
 	version := fmt.Sprintf("%08x", job.Template.Version)
 	ntime := fmt.Sprintf("%08x", job.Template.CurTime)
 	bits := job.Template.BitsHex
@@ -330,6 +338,13 @@ func (s *Server) readIdleTimeout() time.Duration {
 		return 10 * time.Minute
 	}
 	return s.ReadIdleTimeout
+}
+
+func (s *Server) workUpdate() time.Duration {
+	if s.WorkUpdate <= 0 {
+		return 30 * time.Second
+	}
+	return s.WorkUpdate
 }
 
 func (s *Server) writeTimeout() time.Duration {
