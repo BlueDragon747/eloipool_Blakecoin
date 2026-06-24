@@ -21,7 +21,7 @@ const (
 	requestTimeout         = 35 * time.Second
 	idleTimeout            = 5 * time.Minute
 	maxConsecutiveFailures = 5
-	breakerCooldown        = 30 * time.Second
+	breakerCooldown        = 15 * time.Second
 )
 
 // RPCError preserves daemon JSON-RPC error codes so AuxPoW stale/orphan
