@@ -318,6 +318,7 @@ func (s *Service) recordTemplateUpdate(job *work.Job) {
 			"hash", s.lastTemplateHash,
 		)
 		s.parent.ResetConnection()
+		s.lastTemplateAt = now  // dont repeatedly reset on stale detection
 	}
 }
 
