@@ -335,7 +335,7 @@ func (s *Service) parentHeartbeatLoop(ctx context.Context) {
 }
 
 func (s *Service) checkParentHeartbeat() {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	raw, err := s.parent.Call(ctx, "getblockchaininfo")
 	cancel()
 	if err != nil {
