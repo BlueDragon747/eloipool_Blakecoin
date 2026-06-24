@@ -360,12 +360,15 @@ func (s *Service) checkParentHeartbeat() {
 		return
 	}
 	if info.Blocks <= lastHeight {
-		s.logger.Warn("parent daemon height not advancing; forcing connection reset",
-			"last_height", lastHeight,
-			"current_height", info.Blocks,
-			"elapsed", now.Sub(lastAt).Seconds(),
-		)
-		s.parent.ResetConnection()
+		elapsed := now.Sub(lastAt)
+		if elapsed > 2*time.Minute {
+			s.logger.Warn("parent daemon height not advancing; forcing connection reset",
+				"last_height", lastHeight,
+				"current_height", info.Blocks,
+				"elapsed", elapsed.Seconds(),
+			)
+			s.parent.ResetConnection()
+		}
 	}
 }
 
